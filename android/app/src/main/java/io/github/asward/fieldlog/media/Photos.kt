@@ -1,4 +1,4 @@
-package io.github.asward.fieldlog.session
+package io.github.asward.fieldlog.media
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory

@@ -15,13 +15,11 @@ use crate::log::{self, LogEntry, PhotoRef};
 use crate::logsession::{self, OpenLogInfo};
 use crate::s3::{S3Client, S3Config, S3Credentials};
 
-const ENTRY_TRAILER: &str = "FieldLog-Entry: ";
 const LOG_TRAILER: &str = "FieldLog-Log: ";
 const EDIT_TRAILER: &str = "FieldLog-Edit: ";
 const REVERT_TRAILER: &str = "FieldLog-Revert: ";
 /// Marker in the file name of the local side of a sync conflict.
 const CONFLICT_MARK: &str = ".conflict-";
-const UNDO_TRAILER: &str = "FieldLog-Undo: ";
 const PENDING_UPLOADS: &str = "pending-uploads.txt";
 
 // ---------------------------------------------------------------- records
@@ -223,13 +221,6 @@ fn write_gitignore(root: &Path, storage: ImageStorage) -> Result<()> {
     }
     fs::write(root.join(".gitignore"), s)?;
     Ok(())
-}
-
-fn trailer_value<'a>(message: &'a str, key: &str) -> Option<&'a str> {
-    message
-        .lines()
-        .find_map(|l| l.strip_prefix(key))
-        .map(str::trim)
 }
 
 impl Vault {
@@ -961,162 +952,6 @@ impl Vault {
             }
         }
         Ok(Block::photo(sha, ext))
-    }
-
-    /// Write and commit one entry. `created` is RFC 3339; `None` means now.
-    pub fn commit_entry(
-        &self,
-        project: String,
-        blocks: Vec<Block>,
-        tags: Vec<String>,
-        source: Option<String>,
-        created: Option<String>,
-    ) -> Result<CommitInfo> {
-        if !self.root.join(&project).is_dir() {
-            return Err(CoreError::NotFound {
-                msg: format!("project {project}"),
-            });
-        }
-        let body = format::blocks_to_body(&blocks);
-        if body.trim().is_empty() {
-            return Err(invalid("empty entry"));
-        }
-        let created = match created {
-            Some(s) => DateTime::parse_from_rfc3339(&s).map_err(|e| invalid(e.to_string()))?,
-            None => Local::now().fixed_offset(),
-        };
-        let mut tags: Vec<String> = tags
-            .iter()
-            .map(|t| format::slugify(t))
-            .filter(|t| !t.is_empty())
-            .collect();
-        tags.dedup();
-        let photos: Vec<(String, String)> = blocks
-            .iter()
-            .filter_map(|b| match b {
-                Block::Photo { sha256, ext, .. } => Some((sha256.clone(), ext.clone())),
-                _ => None,
-            })
-            .collect();
-
-        let repo = self.repo();
-        // Pick a path that doesn't exist yet.
-        let (suffix, rel) = loop {
-            let s = random_suffix();
-            let r = format::entry_rel_path(&project, &created, &s);
-            if !self.root.join(&r).exists() {
-                break (s, r);
-            }
-        };
-        let fm = FrontMatter {
-            id: format::entry_id(&created, &suffix),
-            project: project.clone(),
-            started: created,
-            ended: None,
-            tags,
-            source,
-            photos: photos.iter().map(|(s, _)| s.clone()).collect(),
-            extra: Default::default(),
-        };
-        let abs = self.root.join(&rel);
-        fs::create_dir_all(abs.parent().unwrap())?;
-        fs::write(&abs, format::render(&fm, &body)?)?;
-
-        let mut add = vec![rel.clone()];
-        if self.config().image_storage == ImageStorage::Git {
-            for (sha, ext) in &photos {
-                let a = format::asset_rel_path(sha, ext);
-                if !self.root.join(&a).exists() {
-                    return Err(CoreError::NotFound {
-                        msg: format!("photo {a}"),
-                    });
-                }
-                add.push(a);
-            }
-        }
-        let summary = format::summary_line(&body, 60);
-        let title = if summary.is_empty() {
-            format!("{} photo(s)", photos.len())
-        } else {
-            summary
-        };
-        let message = format!("{project}: {title}\n\n{ENTRY_TRAILER}{}\n", fm.id);
-        let oid = match self.commit_paths(&repo, &add, &[], &message) {
-            Ok(o) => o,
-            Err(e) => {
-                let _ = fs::remove_file(&abs);
-                return Err(e);
-            }
-        };
-        Ok(CommitInfo {
-            commit: oid.to_string(),
-            entry: summarize(&fm, &body, rel),
-        })
-    }
-
-    /// Revert the most recent entry commit that hasn't been undone yet.
-    /// Returns the entry that was removed.
-    pub fn undo_last_entry(&self) -> Result<EntrySummary> {
-        let repo = self.repo();
-        let head = repo.head().map_err(|_| CoreError::NothingToUndo)?;
-        let head_commit = head.peel_to_commit()?;
-        let mut undone: Vec<String> = Vec::new();
-        let mut target = None;
-        let mut cur = Some(head_commit.clone());
-        for _ in 0..500 {
-            let Some(c) = cur else { break };
-            let msg = c.message().unwrap_or("").to_string();
-            if let Some(id) = trailer_value(&msg, UNDO_TRAILER) {
-                undone.push(id.to_string());
-            } else if let Some(id) = trailer_value(&msg, ENTRY_TRAILER) {
-                if !undone.iter().any(|u| u == id) {
-                    target = Some((c.clone(), id.to_string()));
-                    break;
-                }
-            }
-            cur = c.parent(0).ok();
-        }
-        let (commit, id) = target.ok_or(CoreError::NothingToUndo)?;
-
-        // Describe the entry before it disappears.
-        let tree = commit.tree()?;
-        let parent_tree = commit.parent(0).ok().map(|p| p.tree()).transpose()?;
-        let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)?;
-        let mut summary = None;
-        for d in diff.deltas() {
-            if let Some(p) = d.new_file().path() {
-                if p.extension().is_some_and(|x| x == "md") {
-                    if let Some((fm, body, rel)) = self.load(&self.root.join(p)) {
-                        summary = Some(summarize(&fm, &body, rel));
-                    }
-                }
-            }
-        }
-
-        let mut index = repo.revert_commit(&commit, &head_commit, 0, None)?;
-        if index.has_conflicts() {
-            return Err(CoreError::Conflict {
-                msg: "entry was edited after it was committed; undo it by hand".into(),
-            });
-        }
-        let new_tree = repo.find_tree(index.write_tree_to(&repo)?)?;
-        let sig = self.signature()?;
-        let title = summary
-            .as_ref()
-            .map(|s| s.summary.clone())
-            .unwrap_or_default();
-        repo.commit(
-            Some("HEAD"),
-            &sig,
-            &sig,
-            &format!("Undo: {title}\n\n{UNDO_TRAILER}{id}\n"),
-            &new_tree,
-            &[&head_commit],
-        )?;
-        repo.checkout_head(Some(CheckoutBuilder::new().force()))?;
-        summary.ok_or_else(|| CoreError::NotFound {
-            msg: format!("entry {id}"),
-        })
     }
 
     /// Entries, newest first.

@@ -87,8 +87,7 @@ fun SettingsScreen(nav: Nav) {
     val author = remember { vaults.author }
     var name by remember { mutableStateOf(author.name) }
     var email by remember { mutableStateOf(author.email) }
-    var prefix by remember { mutableStateOf(vaults.commandPrefix) }
-    var silence by remember { mutableStateOf(vaults.silenceTimeoutSecs.toFloat()) }
+    var idle by remember { mutableStateOf(vaults.idleMinutes.toFloat()) }
     var volumeKeys by remember { mutableStateOf(vaults.volumeKeys) }
     var fbSound by remember { mutableStateOf(vaults.feedbackSound) }
     var fbVolume by remember { mutableStateOf(vaults.feedbackVolume) }
@@ -99,8 +98,7 @@ fun SettingsScreen(nav: Nav) {
 
     fun save() {
         vaults.author = Author(name.trim().ifEmpty { "FieldLog" }, email.trim().ifEmpty { "fieldlog@localhost" })
-        vaults.commandPrefix = prefix
-        vaults.silenceTimeoutSecs = silence.roundToInt()
+        vaults.idleMinutes = idle.roundToInt()
         vaults.volumeKeys = volumeKeys
         vaults.feedbackSound = fbSound
         vaults.feedbackVolume = fbVolume
@@ -120,25 +118,18 @@ fun SettingsScreen(nav: Nav) {
                 headlineContent = { Text("Speech recognition") },
                 supportingContent = { Text("${vaults.speechSetup.label} · run the speech check") },
             )
-            OutlinedTextField(
-                prefix, { prefix = it }, label = { Text("Command prefix") }, singleLine = true,
-                supportingText = {
-                    Text(
-                        "Leave empty to use bare commands (“next”), which only fire when said on their own. " +
-                            "Set e.g. “log” if commands misfire, then say “log next”.",
-                    )
-                },
-                modifier = Modifier.fillMaxWidth(),
+            ListItem(
+                modifier = Modifier.clickable { save(); nav.push(Screen.Phrases) },
+                headlineContent = { Text("Command phrases") },
+                supportingContent = { Text("What to say for note, end note, snap, end log…") },
             )
-            val secs = silence.roundToInt()
-            Text(
-                if (secs == 0) "Auto-save on silence: off" else "Auto-save after ${secs}s of silence",
-                modifier = Modifier.padding(top = 12.dp),
-            )
-            Slider(value = silence, onValueChange = { silence = it }, valueRange = 0f..120f, steps = 11)
+            val mins = idle.roundToInt()
+            Text("Stop the mic after $mins min without speech", modifier = Modifier.padding(top = 12.dp))
+            Text("The log stays open; a notification lets you resume or end it.", style = MaterialTheme.typography.bodySmall)
+            Slider(value = idle, onValueChange = { idle = it }, valueRange = 5f..60f, steps = 10)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Volume keys in sessions")
+                    Text("Volume keys on the log screen")
                     Text("Up takes a photo, down mutes or unmutes the mic.", style = MaterialTheme.typography.bodySmall)
                 }
                 Switch(checked = volumeKeys, onCheckedChange = { volumeKeys = it })

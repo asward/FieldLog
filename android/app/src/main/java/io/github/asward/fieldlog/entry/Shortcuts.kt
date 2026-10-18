@@ -6,10 +6,10 @@ import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
 import io.github.asward.fieldlog.R
-import io.github.asward.fieldlog.session.SessionActivity
+import io.github.asward.fieldlog.log.LogActivity
 import io.github.asward.fieldlog.vaults
 
-/** Launcher shortcuts: one per recent project, each opening a session there. */
+/** Launcher shortcuts: one per recent project, each starting a log there. */
 object Shortcuts {
     private const val MAX = 4
 
@@ -23,7 +23,7 @@ object Shortcuts {
                 val recent = (vaults.recentProjects(vaultId) + titles.keys)
                     .distinct().filter { it in titles }.take(MAX)
                 val shortcuts = recent.mapIndexed { rank, slug ->
-                    val intent = SessionActivity.intent(app, vaultId, slug).setAction(Intent.ACTION_VIEW)
+                    val intent = LogActivity.newLogIntent(app, vaultId, slug).setAction(Intent.ACTION_VIEW)
                     ShortcutInfoCompat.Builder(app, "project:$vaultId:$slug")
                         .setShortLabel(titles.getValue(slug).take(25))
                         .setLongLabel("Log: ${titles.getValue(slug)}".take(45))

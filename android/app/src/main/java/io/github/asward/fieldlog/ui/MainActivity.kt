@@ -17,10 +17,11 @@ import io.github.asward.fieldlog.vaults
 sealed interface Screen {
     data object Home : Screen
     data class Project(val slug: String, val title: String) : Screen
-    data class Entry(val path: String) : Screen
+    data class Log(val path: String) : Screen
     data object Search : Screen
     data object Settings : Screen
     data object Speech : Screen
+    data object Phrases : Screen
     /** `vaultId == null` adds a new vault. */
     data class VaultSetup(val vaultId: String?) : Screen
 }
@@ -61,10 +62,11 @@ class MainActivity : ComponentActivity() {
         when (val s = nav.top) {
             Screen.Home -> HomeScreen(nav)
             is Screen.Project -> ProjectScreen(nav, s.slug, s.title)
-            is Screen.Entry -> EntryScreen(nav, s.path)
+            is Screen.Log -> LogViewScreen(nav, s.path)
             Screen.Search -> SearchScreen(nav)
             Screen.Settings -> SettingsScreen(nav)
             Screen.Speech -> SpeechScreen(nav)
+            Screen.Phrases -> PhrasesScreen(nav)
             is Screen.VaultSetup -> VaultSetupScreen(nav, s.vaultId)
         }
     }
