@@ -103,13 +103,12 @@ pub fn spike_ls_remote(
     });
     // Spike only: accept any host key. The real core pins known hosts.
     cb.certificate_check(|_, _| Ok(git2::CertificateCheckStatus::CertificateOk));
-    remote.connect_auth(git2::Direction::Fetch, Some(cb), None)?;
-    let refs = remote
+    let conn = remote.connect_auth(git2::Direction::Fetch, Some(cb), None)?;
+    let refs = conn
         .list()?
         .iter()
         .map(|h| format!("{} {}", h.oid(), h.name()))
         .collect();
-    remote.disconnect()?;
     Ok(refs)
 }
 
@@ -122,6 +121,16 @@ mod tests {
         let i = libgit_info();
         assert!(i.ssh, "libgit2 built without ssh");
         assert!(i.https, "libgit2 built without https");
+    }
+
+    #[test]
+    fn ls_remote_lists_refs() {
+        let d = tempfile::tempdir().unwrap();
+        let repo = d.path().join("r");
+        spike_local_commit(repo.to_string_lossy().into()).unwrap();
+        let url = format!("file://{}", repo.display());
+        let refs = spike_ls_remote(url, String::new(), None).unwrap();
+        assert!(refs.iter().any(|r| r.ends_with(" HEAD")), "{refs:?}");
     }
 
     #[test]
