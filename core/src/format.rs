@@ -1,4 +1,5 @@
-//! Entry file format: Markdown with YAML front matter. See docs/FORMAT.md.
+//! File format: Markdown with YAML front matter. See docs/FORMAT.md.
+//! Log bodies (entries under timestamp headings) live in `log.rs`.
 
 use std::collections::BTreeMap;
 
@@ -20,7 +21,12 @@ pub const PROJECT_FILE: &str = "README.md";
 pub struct FrontMatter {
     pub id: String,
     pub project: String,
-    pub created: DateTime<FixedOffset>,
+    /// When the log started. V1 files call this `created`.
+    #[serde(alias = "created")]
+    pub started: DateTime<FixedOffset>,
+    /// When the log ended (`end log`). Absent in v1 files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<DateTime<FixedOffset>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -136,15 +142,37 @@ pub fn tidy_sentence(s: &str) -> String {
     out
 }
 
-/// One piece of a draft entry, in narration order.
+/// One piece of an entry, in narration order. A photo carries its spoken
+/// annotation and markup suggestions (for a later AI pass) with it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, uniffi::Enum)]
 pub enum Block {
-    Text { text: String },
-    Photo { sha256: String, ext: String },
+    Text {
+        text: String,
+    },
+    Photo {
+        sha256: String,
+        ext: String,
+        #[serde(default)]
+        annotation: String,
+        #[serde(default)]
+        markup: Vec<String>,
+    },
 }
 
-/// Render draft blocks to a Markdown body. Consecutive sentences form a
-/// paragraph; each photo sits on its own line where it was taken.
+impl Block {
+    pub fn photo(sha256: String, ext: String) -> Block {
+        Block::Photo {
+            sha256,
+            ext,
+            annotation: String::new(),
+            markup: Vec::new(),
+        }
+    }
+}
+
+/// Render blocks to Markdown. Consecutive text blocks form a paragraph; each
+/// photo sits on its own line where it was taken, followed by its annotation
+/// (as a quote) and markup (a `fieldlog-markup` fence).
 pub fn blocks_to_body(blocks: &[Block]) -> String {
     let mut paras: Vec<String> = Vec::new();
     let mut cur: Vec<String> = Vec::new();
@@ -156,12 +184,41 @@ pub fn blocks_to_body(blocks: &[Block]) -> String {
                     cur.push(t.to_string());
                 }
             }
-            Block::Photo { sha256, ext } => {
+            Block::Photo {
+                sha256,
+                ext,
+                annotation,
+                markup,
+            } => {
                 if !cur.is_empty() {
                     paras.push(cur.join(" "));
                     cur.clear();
                 }
                 paras.push(format!("![]({})", asset_link_from_entry(sha256, ext)));
+                let a = annotation.trim();
+                if !a.is_empty() {
+                    paras.push(
+                        a.lines()
+                            .map(|l| {
+                                let l = l.trim_end();
+                                if l.is_empty() {
+                                    ">".to_string()
+                                } else {
+                                    format!("> {l}")
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                }
+                let lines: Vec<&str> = markup
+                    .iter()
+                    .map(|m| m.trim())
+                    .filter(|m| !m.is_empty())
+                    .collect();
+                if !lines.is_empty() {
+                    paras.push(format!("```{MARKUP_FENCE}\n{}\n```", lines.join("\n")));
+                }
             }
         }
     }
@@ -169,6 +226,24 @@ pub fn blocks_to_body(blocks: &[Block]) -> String {
         paras.push(cur.join(" "));
     }
     paras.join("\n\n")
+}
+
+/// Info string of the fenced block holding a photo's markup suggestions.
+pub const MARKUP_FENCE: &str = "fieldlog-markup";
+
+/// Remove the final sentence of `text`. Returns (remaining, removed).
+pub fn split_last_sentence(text: &str) -> (String, String) {
+    let t = text.trim_end();
+    let body = t.trim_end_matches(['.', '!', '?', '…']);
+    let cut = body
+        .char_indices()
+        .filter(|(_, c)| matches!(c, '.' | '!' | '?' | '…'))
+        .map(|(i, c)| i + c.len_utf8())
+        .rfind(|&i| body[i..].starts_with(char::is_whitespace));
+    match cut {
+        Some(i) => (t[..i].trim_end().to_string(), t[i..].trim().to_string()),
+        None => (String::new(), t.to_string()),
+    }
 }
 
 /// First line of the body that isn't an image, for list views.
@@ -195,7 +270,8 @@ mod tests {
         FrontMatter {
             id: "20261017T204512-a1b2".into(),
             project: "deck".into(),
-            created: DateTime::parse_from_rfc3339("2026-10-17T20:45:12-07:00").unwrap(),
+            started: DateTime::parse_from_rfc3339("2026-10-17T20:45:12-07:00").unwrap(),
+            ended: None,
             tags: vec!["framing".into()],
             source: Some("session".into()),
             photos: vec![],
@@ -232,10 +308,10 @@ mod tests {
     fn paths() {
         let f = fm();
         assert_eq!(
-            entry_rel_path("deck", &f.created, "a1b2"),
+            entry_rel_path("deck", &f.started, "a1b2"),
             "deck/2026/10/2026-10-17-204512-a1b2.md"
         );
-        assert_eq!(entry_id(&f.created, "a1b2"), "20261017T204512-a1b2");
+        assert_eq!(entry_id(&f.started, "a1b2"), "20261017T204512-a1b2");
         assert_eq!(asset_rel_path("abcdef", "jpg"), "assets/ab/abcdef.jpg");
     }
 
@@ -265,10 +341,7 @@ mod tests {
             Block::Text {
                 text: "Second.".into(),
             },
-            Block::Photo {
-                sha256: "abcd".into(),
-                ext: "jpg".into(),
-            },
+            Block::photo("abcd".into(), "jpg".into()),
             Block::Text {
                 text: "After.".into(),
             },

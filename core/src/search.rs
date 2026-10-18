@@ -7,7 +7,14 @@ use crate::vault::{SearchHit, Vault};
 fn snippet(body: &str, term: &str, radius: usize) -> String {
     let text: String = body
         .lines()
-        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("!["))
+        .map(str::trim)
+        .filter(|l| {
+            !l.is_empty()
+                && !l.starts_with("![")
+                && !l.starts_with("```")
+                && !crate::log::is_entry_heading(l)
+        })
+        .map(|l| l.strip_prefix('>').map(str::trim_start).unwrap_or(l))
         .collect::<Vec<_>>()
         .join(" ");
     let lower = text.to_lowercase();
@@ -115,5 +122,7 @@ mod tests {
             snippet(body, "glue", 100),
             body.replace("\n\n![](x.jpg)\n\n", " ")
         );
+        let log = "## 10:00:00 Note\n\nCut it.\n\n![](x.jpg)\n\n> Soft wood.\n\n```fieldlog-markup\ncircle\n```";
+        assert_eq!(snippet(log, "soft", 100), "Cut it. Soft wood. circle");
     }
 }
