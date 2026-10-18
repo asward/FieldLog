@@ -55,6 +55,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import io.github.asward.fieldlog.speech.SpeechSupport
+import io.github.asward.fieldlog.ui.BannerColors
+import io.github.asward.fieldlog.ui.ModeBanner
 import io.github.asward.fieldlog.ui.Thumb
 import io.github.asward.fieldlog.vaults
 import androidx.compose.ui.platform.LocalContext
@@ -89,6 +91,18 @@ fun SessionScreen(c: SessionController, onClose: () -> Unit) {
             ListeningDot(c.micOn && c.listening)
             IconButton(onClick = onClose) { Icon(Icons.Default.Close, "Close session") }
         }
+
+        ModeBanner(
+            title = when {
+                !c.micOn -> "Mic off"
+                c.listening -> "Listening"
+                else -> "Starting mic…"
+            },
+            color = if (c.micOn && c.listening) BannerColors.Note else BannerColors.Off,
+            hint = c.partial.takeIf { it.isNotBlank() },
+            level = if (c.micOn && c.listening) c.level else null,
+            modifier = Modifier.padding(top = 8.dp),
+        )
 
         c.fallback?.let { msg ->
             Row(
