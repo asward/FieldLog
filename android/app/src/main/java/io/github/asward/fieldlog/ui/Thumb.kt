@@ -11,7 +11,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import io.github.asward.fieldlog.session.Photos
+import io.github.asward.fieldlog.media.Photos
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 

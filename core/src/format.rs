@@ -323,6 +323,19 @@ mod tests {
     }
 
     #[test]
+    fn last_sentence() {
+        assert_eq!(
+            split_last_sentence("One. Two? Three."),
+            ("One. Two?".into(), "Three.".into())
+        );
+        assert_eq!(split_last_sentence("Only."), ("".into(), "Only.".into()));
+        assert_eq!(
+            split_last_sentence("v1.2 is out. Yes"),
+            ("v1.2 is out.".into(), "Yes".into())
+        );
+    }
+
+    #[test]
     fn sentences() {
         assert_eq!(
             tidy_sentence("the joist is cracked"),

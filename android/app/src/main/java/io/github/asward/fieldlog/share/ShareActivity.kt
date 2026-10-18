@@ -31,7 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
-import io.github.asward.fieldlog.session.Photos
+import io.github.asward.fieldlog.media.Photos
 import io.github.asward.fieldlog.sync.SyncWorker
 import io.github.asward.fieldlog.ui.FieldLogTheme
 import io.github.asward.fieldlog.ui.MainActivity
@@ -43,7 +43,7 @@ import kotlinx.coroutines.withContext
 import uniffi.fieldlog_core.ProjectInfo
 import uniffi.fieldlog_core.commitShared
 
-/** Share sheet target: text, links and images. One tap saves to the sticky project. */
+/** Share sheet target: text, links and images. One tap saves a one-note log to the active project. */
 class ShareActivity : ComponentActivity() {
 
     private data class Shared(val text: String?, val images: List<Uri>) {
@@ -79,8 +79,8 @@ class ShareActivity : ComponentActivity() {
                 finish()
                 return@launch
             }
-            val sticky = vaults.stickyProject(vaultId)
-            val ordered = projects.sortedByDescending { it.slug == sticky }
+            val active = vaults.activeProject(vaultId)
+            val ordered = projects.sortedByDescending { it.slug == active }
             setContent {
                 FieldLogTheme {
                     Surface(shape = MaterialTheme.shapes.extraLarge) {

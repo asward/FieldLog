@@ -16,8 +16,6 @@ pub enum CoreError {
     HostKeyMismatch { expected: String, actual: String },
     #[error("s3: {msg}")]
     S3 { msg: String },
-    #[error("nothing to undo")]
-    NothingToUndo,
     /// A log is open in this vault (resume or end it first).
     #[error("log open: {msg}")]
     LogOpen { msg: String },

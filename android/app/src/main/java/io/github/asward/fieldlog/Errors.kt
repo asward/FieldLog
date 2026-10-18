@@ -13,6 +13,6 @@ fun Throwable.userMessage(): String = when (this) {
     is CoreException.HostKeyMismatch ->
         "The server's SSH host key changed. If you expected this, forget the saved key in vault settings."
     is CoreException.S3 -> "Image storage: $msg"
-    is CoreException.NothingToUndo -> "Nothing to undo"
+    is CoreException.LogOpen -> "A log is open. Resume or end it first."
     else -> message ?: javaClass.simpleName
 }
