@@ -29,6 +29,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -50,8 +51,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /**
- * Settings → Speech: the per-phone speech check (spec §7). Tries each setup,
- * then lists the ones that worked, fastest first, with the best pre-selected.
+ * Settings → Speech: the per-phone speech check (spec §7). Test one setup or
+ * run them all; the results list working setups fastest first, and running
+ * all of them pre-selects the best.
  */
 @Composable
 fun SpeechScreen(nav: Nav) {
@@ -61,28 +63,51 @@ fun SpeechScreen(nav: Nav) {
     var results by remember { mutableStateOf(vaults.speechResults) }
     var chosen by remember { mutableStateOf(vaults.speechSetup) }
     var testing by remember { mutableStateOf<SpeechSetup?>(null) }
-    var level by remember { mutableFloatStateOf(0f) }
+    /** The recogniser is listening: time to speak. */
+    var speakNow by remember { mutableStateOf(false) }
+    var level by remember { mutableFloatStateOf(-2f) }
     var job by remember { mutableStateOf<Job?>(null) }
+    var pending by remember { mutableStateOf<List<SpeechSetup>>(emptyList()) }
 
-    fun runCheck() {
+    // Leaving the screen stops a running check (and releases the mic).
+    DisposableEffect(Unit) { onDispose { job?.cancel() } }
+
+    fun runTests(setups: List<SpeechSetup>) {
+        val all = setups.size > 1
         job = scope.launch {
-            val out = mutableListOf<SpeechResult>()
-            for (setup in SpeechSetup.ALL) {
-                testing = setup
-                out += SpeechCheck.run(context, setup) { level = it }
-                results = out.toList() + results.filter { r -> out.none { it.setup == r.setup } }
-            }
-            testing = null
-            vaults.speechResults = out
-            SpeechResult.best(out)?.let {
-                chosen = it.setup
-                vaults.speechSetup = it.setup
+            try {
+                for (setup in setups) {
+                    testing = setup
+                    speakNow = false
+                    level = -2f
+                    val r = SpeechCheck.run(context, setup, ready = { speakNow = true }) { level = it }
+                    results = listOf(r) + results.filter { it.setup != setup }
+                    vaults.speechResults = results
+                }
+                if (all) {
+                    SpeechResult.best(results)?.let {
+                        chosen = it.setup
+                        vaults.speechSetup = it.setup
+                    }
+                }
+            } finally {
+                testing = null
+                speakNow = false
             }
         }
     }
 
     val mic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-        if (ok) runCheck() else context.toast("The speech check needs the microphone")
+        if (ok) runTests(pending) else context.toast("The speech check needs the microphone")
+    }
+
+    fun start(setups: List<SpeechSetup>) {
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (granted) runTests(setups) else {
+            pending = setups
+            mic.launch(Manifest.permission.RECORD_AUDIO)
+        }
     }
 
     Scaffold(topBar = { BackBar(nav, "Speech") }) { pad ->
@@ -92,8 +117,8 @@ fun SpeechScreen(nav: Nav) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                "Phones differ in which speech setups work and how fast they are. The check tries each one: " +
-                    "say the phrase when asked. Re-run it after an OS update.",
+                "Phones differ in which speech setups work and how fast they are. Test one setup, or run them all; " +
+                    "wait for “Speak now”, then say the phrase. Re-run after an OS update.",
                 style = MaterialTheme.typography.bodyMedium,
             )
             if (!SpeechSupport.continuousSupported()) {
@@ -111,24 +136,26 @@ fun SpeechScreen(nav: Nav) {
                     Column(Modifier.fillMaxWidth().padding(16.dp)) {
                         Text("Testing ${t.label}", style = MaterialTheme.typography.labelLarge)
                         Spacer(Modifier.height(8.dp))
-                        Text("Say: “${SpeechCheck.PROMPT}”", style = MaterialTheme.typography.titleMedium)
-                        Spacer(Modifier.height(12.dp))
-                        LinearProgressIndicator(
-                            progress = { ((level + 2f) / 12f).coerceIn(0f, 1f) },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        TextButton(onClick = { job?.cancel(); testing = null }) { Text("Stop") }
+                        if (!speakNow) {
+                            Text("Getting ready… (loading the recogniser)", style = MaterialTheme.typography.titleMedium)
+                            Spacer(Modifier.height(12.dp))
+                            LinearProgressIndicator(Modifier.fillMaxWidth())
+                        } else {
+                            Text("Speak now: “${SpeechCheck.PROMPT}”", style = MaterialTheme.typography.titleMedium)
+                            Spacer(Modifier.height(12.dp))
+                            LevelMeter(
+                                level,
+                                Modifier.fillMaxWidth().height(10.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        TextButton(onClick = { job?.cancel() }) { Text("Stop") }
                     }
                 }
             } else {
-                Button(
-                    onClick = {
-                        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-                            PackageManager.PERMISSION_GRANTED
-                        if (granted) runCheck() else mic.launch(Manifest.permission.RECORD_AUDIO)
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text(if (results.isEmpty()) "Run speech check" else "Run again") }
+                Button(onClick = { start(SpeechSetup.ALL) }, modifier = Modifier.fillMaxWidth()) {
+                    Text(if (results.isEmpty()) "Run all four" else "Run all again")
+                }
             }
 
             Text("Setups", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
@@ -154,7 +181,7 @@ fun SpeechScreen(nav: Nav) {
                     Column(Modifier.weight(1f)) {
                         Text(setup.label, fontWeight = if (chosen == setup) FontWeight.Bold else null)
                         Text(
-                            unavailable ?: r?.summary ?: "Not checked yet",
+                            unavailable ?: r?.summary ?: "Not tested yet",
                             style = MaterialTheme.typography.bodySmall,
                             color = if (r?.worked == false || unavailable != null) MaterialTheme.colorScheme.error
                             else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -164,16 +191,25 @@ fun SpeechScreen(nav: Nav) {
                         }
                     }
                     if (r?.needsLanguagePack == true) {
-                        OutlinedButton(onClick = {
+                        TextButton(onClick = {
                             if (SpeechSupport.triggerLanguageDownload(context)) {
-                                context.toast("Downloading; run the check again when it's done")
+                                context.toast("Downloading; test again when it's done")
                             } else {
                                 context.toast("Download it in the phone's speech settings")
                             }
                         }) { Text("Download") }
                     }
+                    if (unavailable == null) {
+                        OutlinedButton(enabled = testing == null, onClick = { start(listOf(setup)) }) { Text("Test") }
+                    }
                 }
             }
+            Text(
+                "“First words” is how long after you start talking the text appears; that's what you feel while logging. " +
+                    "“Ready in” is the one-off start-up when a log opens.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Spacer(Modifier.height(24.dp))
         }
     }
