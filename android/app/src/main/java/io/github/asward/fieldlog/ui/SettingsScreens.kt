@@ -81,12 +81,14 @@ fun SettingsScreen(nav: Nav) {
     var email by remember { mutableStateOf(author.email) }
     var prefix by remember { mutableStateOf(vaults.commandPrefix) }
     var silence by remember { mutableStateOf(vaults.silenceTimeoutSecs.toFloat()) }
+    var volumeKeys by remember { mutableStateOf(vaults.volumeKeys) }
     val list = remember(version) { vaults.list() }
 
     fun save() {
         vaults.author = Author(name.trim().ifEmpty { "FieldLog" }, email.trim().ifEmpty { "fieldlog@localhost" })
         vaults.commandPrefix = prefix
         vaults.silenceTimeoutSecs = silence.roundToInt()
+        vaults.volumeKeys = volumeKeys
     }
 
     Scaffold(topBar = {
@@ -113,6 +115,13 @@ fun SettingsScreen(nav: Nav) {
                 modifier = Modifier.padding(top = 12.dp),
             )
             Slider(value = silence, onValueChange = { silence = it }, valueRange = 0f..120f, steps = 11)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Volume keys in sessions")
+                    Text("Up takes a photo, down mutes or unmutes the mic.", style = MaterialTheme.typography.bodySmall)
+                }
+                Switch(checked = volumeKeys, onCheckedChange = { volumeKeys = it })
+            }
 
             Section("Commit author")
             OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
