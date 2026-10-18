@@ -15,13 +15,11 @@ use crate::log::{self, LogEntry, PhotoRef};
 use crate::logsession::{self, OpenLogInfo};
 use crate::s3::{S3Client, S3Config, S3Credentials};
 
-const ENTRY_TRAILER: &str = "FieldLog-Entry: ";
 const LOG_TRAILER: &str = "FieldLog-Log: ";
 const EDIT_TRAILER: &str = "FieldLog-Edit: ";
 const REVERT_TRAILER: &str = "FieldLog-Revert: ";
 /// Marker in the file name of the local side of a sync conflict.
 const CONFLICT_MARK: &str = ".conflict-";
-const UNDO_TRAILER: &str = "FieldLog-Undo: ";
 const PENDING_UPLOADS: &str = "pending-uploads.txt";
 
 // ---------------------------------------------------------------- records
@@ -29,10 +27,23 @@ const PENDING_UPLOADS: &str = "pending-uploads.txt";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageStorage {
-    /// Images are committed to the repo under `assets/`.
+    /// Images are committed to the repo under `assets/`. Meant for
+    /// self-hosted remotes; hosted ones (GitHub…) fill up quickly.
     Git,
-    /// Images live in S3; `assets/` is a local cache and is git-ignored.
+    /// Images live in S3 (or R2); `assets/` is a local cache and is
+    /// git-ignored. Uploaded before every push.
     S3,
+    /// Images stay on this device in `assets/` (git-ignored) and are queued
+    /// for upload, so switching to S3 later syncs them with no rewrite.
+    /// The default for new vaults.
+    Local,
+}
+
+impl ImageStorage {
+    /// `assets/` is git-ignored.
+    fn ignores_assets(self) -> bool {
+        matches!(self, ImageStorage::S3 | ImageStorage::Local)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, uniffi::Record)]
@@ -78,6 +89,13 @@ pub struct SyncReport {
     /// Local versions of logs edited on two devices, kept next to the
     /// remote version.
     pub conflict_copies: Vec<String>,
+}
+
+/// Photos that exist only on this device.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PhotoBackup {
+    pub count: u32,
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -198,18 +216,11 @@ fn random_suffix() -> String {
 
 fn write_gitignore(root: &Path, storage: ImageStorage) -> Result<()> {
     let mut s = format!("{LOCAL_DIR}/\n");
-    if storage == ImageStorage::S3 {
+    if storage.ignores_assets() {
         s.push_str(&format!("{ASSETS_DIR}/\n"));
     }
     fs::write(root.join(".gitignore"), s)?;
     Ok(())
-}
-
-fn trailer_value<'a>(message: &'a str, key: &str) -> Option<&'a str> {
-    message
-        .lines()
-        .find_map(|l| l.strip_prefix(key))
-        .map(str::trim)
 }
 
 impl Vault {
@@ -279,7 +290,7 @@ impl Vault {
     fn bootstrap(root: &Path, repo: &Repository, name: &str, author: &Author) -> Result<()> {
         let cfg = VaultConfig {
             name: name.to_string(),
-            image_storage: ImageStorage::Git,
+            image_storage: ImageStorage::Local,
             s3: None,
         };
         fs::write(root.join(CONFIG_FILE), toml::to_string(&cfg)?)?;
@@ -564,6 +575,24 @@ impl Vault {
         Ok(copies)
     }
 
+    fn asset_rel_paths(&self) -> Vec<String> {
+        let dir = self.root.join(ASSETS_DIR);
+        let mut out: Vec<String> = walkdir::WalkDir::new(&dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| e.path().extension().is_none_or(|x| x != "tmp"))
+            .filter_map(|e| {
+                e.path()
+                    .strip_prefix(&self.root)
+                    .ok()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
     fn pending_path(&self) -> Result<PathBuf> {
         Ok(self.local_dir()?.join(PENDING_UPLOADS))
     }
@@ -795,17 +824,23 @@ impl Vault {
     }
 
     /// Update and commit `fieldlog.toml` (and `.gitignore` for storage mode).
+    ///
+    /// - Git → local or S3: assets stop being tracked (they stay on disk)
+    ///   and are queued for upload. History keeps what was committed.
+    /// - Local → S3: the queue drains on the next sync.
+    /// - Local or S3 → git: photos on this device are committed.
     pub fn set_config(&self, config: VaultConfig) -> Result<()> {
         if config.image_storage == ImageStorage::S3 && config.s3.is_none() {
             return Err(invalid("S3 image storage needs an [s3] section"));
         }
+        let before = self.config().image_storage;
         let repo = self.repo();
         fs::write(self.root.join(CONFIG_FILE), toml::to_string(&config)?)?;
         write_gitignore(&self.root, config.image_storage)?;
         let mut remove = vec![];
-        if config.image_storage == ImageStorage::S3 {
-            // Stop tracking assets (files stay on disk as the local cache) and
-            // queue anything not yet uploaded.
+        let mut add = vec![CONFIG_FILE.to_string(), ".gitignore".to_string()];
+        let to_ignored = config.image_storage.ignores_assets();
+        if to_ignored && !before.ignores_assets() {
             let index = repo.index()?;
             let tracked: Vec<String> = index
                 .iter()
@@ -823,13 +858,11 @@ impl Vault {
             }
             self.set_pending_uploads(&pending)?;
             remove = tracked;
+        } else if !to_ignored && before.ignores_assets() {
+            add.extend(self.asset_rel_paths());
+            self.set_pending_uploads(&[])?;
         }
-        self.commit_paths(
-            &repo,
-            &[CONFIG_FILE.to_string(), ".gitignore".to_string()],
-            &remove,
-            "Update vault settings",
-        )?;
+        self.commit_paths(&repo, &add, &remove, "Update vault settings")?;
         *lock(&self.config) = config;
         Ok(())
     }
@@ -910,7 +943,7 @@ impl Vault {
             fs::write(&tmp, &bytes)?;
             fs::rename(&tmp, &abs)?;
         }
-        if self.config().image_storage == ImageStorage::S3 {
+        if self.config().image_storage.ignores_assets() {
             let name = format!("{sha}.{ext}");
             let mut pending = self.pending_uploads();
             if !pending.contains(&name) {
@@ -919,162 +952,6 @@ impl Vault {
             }
         }
         Ok(Block::photo(sha, ext))
-    }
-
-    /// Write and commit one entry. `created` is RFC 3339; `None` means now.
-    pub fn commit_entry(
-        &self,
-        project: String,
-        blocks: Vec<Block>,
-        tags: Vec<String>,
-        source: Option<String>,
-        created: Option<String>,
-    ) -> Result<CommitInfo> {
-        if !self.root.join(&project).is_dir() {
-            return Err(CoreError::NotFound {
-                msg: format!("project {project}"),
-            });
-        }
-        let body = format::blocks_to_body(&blocks);
-        if body.trim().is_empty() {
-            return Err(invalid("empty entry"));
-        }
-        let created = match created {
-            Some(s) => DateTime::parse_from_rfc3339(&s).map_err(|e| invalid(e.to_string()))?,
-            None => Local::now().fixed_offset(),
-        };
-        let mut tags: Vec<String> = tags
-            .iter()
-            .map(|t| format::slugify(t))
-            .filter(|t| !t.is_empty())
-            .collect();
-        tags.dedup();
-        let photos: Vec<(String, String)> = blocks
-            .iter()
-            .filter_map(|b| match b {
-                Block::Photo { sha256, ext, .. } => Some((sha256.clone(), ext.clone())),
-                _ => None,
-            })
-            .collect();
-
-        let repo = self.repo();
-        // Pick a path that doesn't exist yet.
-        let (suffix, rel) = loop {
-            let s = random_suffix();
-            let r = format::entry_rel_path(&project, &created, &s);
-            if !self.root.join(&r).exists() {
-                break (s, r);
-            }
-        };
-        let fm = FrontMatter {
-            id: format::entry_id(&created, &suffix),
-            project: project.clone(),
-            started: created,
-            ended: None,
-            tags,
-            source,
-            photos: photos.iter().map(|(s, _)| s.clone()).collect(),
-            extra: Default::default(),
-        };
-        let abs = self.root.join(&rel);
-        fs::create_dir_all(abs.parent().unwrap())?;
-        fs::write(&abs, format::render(&fm, &body)?)?;
-
-        let mut add = vec![rel.clone()];
-        if self.config().image_storage == ImageStorage::Git {
-            for (sha, ext) in &photos {
-                let a = format::asset_rel_path(sha, ext);
-                if !self.root.join(&a).exists() {
-                    return Err(CoreError::NotFound {
-                        msg: format!("photo {a}"),
-                    });
-                }
-                add.push(a);
-            }
-        }
-        let summary = format::summary_line(&body, 60);
-        let title = if summary.is_empty() {
-            format!("{} photo(s)", photos.len())
-        } else {
-            summary
-        };
-        let message = format!("{project}: {title}\n\n{ENTRY_TRAILER}{}\n", fm.id);
-        let oid = match self.commit_paths(&repo, &add, &[], &message) {
-            Ok(o) => o,
-            Err(e) => {
-                let _ = fs::remove_file(&abs);
-                return Err(e);
-            }
-        };
-        Ok(CommitInfo {
-            commit: oid.to_string(),
-            entry: summarize(&fm, &body, rel),
-        })
-    }
-
-    /// Revert the most recent entry commit that hasn't been undone yet.
-    /// Returns the entry that was removed.
-    pub fn undo_last_entry(&self) -> Result<EntrySummary> {
-        let repo = self.repo();
-        let head = repo.head().map_err(|_| CoreError::NothingToUndo)?;
-        let head_commit = head.peel_to_commit()?;
-        let mut undone: Vec<String> = Vec::new();
-        let mut target = None;
-        let mut cur = Some(head_commit.clone());
-        for _ in 0..500 {
-            let Some(c) = cur else { break };
-            let msg = c.message().unwrap_or("").to_string();
-            if let Some(id) = trailer_value(&msg, UNDO_TRAILER) {
-                undone.push(id.to_string());
-            } else if let Some(id) = trailer_value(&msg, ENTRY_TRAILER) {
-                if !undone.iter().any(|u| u == id) {
-                    target = Some((c.clone(), id.to_string()));
-                    break;
-                }
-            }
-            cur = c.parent(0).ok();
-        }
-        let (commit, id) = target.ok_or(CoreError::NothingToUndo)?;
-
-        // Describe the entry before it disappears.
-        let tree = commit.tree()?;
-        let parent_tree = commit.parent(0).ok().map(|p| p.tree()).transpose()?;
-        let diff = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)?;
-        let mut summary = None;
-        for d in diff.deltas() {
-            if let Some(p) = d.new_file().path() {
-                if p.extension().is_some_and(|x| x == "md") {
-                    if let Some((fm, body, rel)) = self.load(&self.root.join(p)) {
-                        summary = Some(summarize(&fm, &body, rel));
-                    }
-                }
-            }
-        }
-
-        let mut index = repo.revert_commit(&commit, &head_commit, 0, None)?;
-        if index.has_conflicts() {
-            return Err(CoreError::Conflict {
-                msg: "entry was edited after it was committed; undo it by hand".into(),
-            });
-        }
-        let new_tree = repo.find_tree(index.write_tree_to(&repo)?)?;
-        let sig = self.signature()?;
-        let title = summary
-            .as_ref()
-            .map(|s| s.summary.clone())
-            .unwrap_or_default();
-        repo.commit(
-            Some("HEAD"),
-            &sig,
-            &sig,
-            &format!("Undo: {title}\n\n{UNDO_TRAILER}{id}\n"),
-            &new_tree,
-            &[&head_commit],
-        )?;
-        repo.checkout_head(Some(CheckoutBuilder::new().force()))?;
-        summary.ok_or_else(|| CoreError::NotFound {
-            msg: format!("entry {id}"),
-        })
     }
 
     /// Entries, newest first.
@@ -1165,9 +1042,36 @@ impl Vault {
         self.pending_uploads().len() as u32
     }
 
+    /// Photos not yet in S3 (local and S3 storage). In git storage, photos
+    /// are backed up by pushing, so this is empty.
+    pub fn photo_backup(&self) -> PhotoBackup {
+        if !self.config().image_storage.ignores_assets() {
+            return PhotoBackup { count: 0, bytes: 0 };
+        }
+        let mut count = 0;
+        let mut bytes = 0;
+        for name in self.pending_uploads() {
+            let (sha, ext) = name.split_once('.').unwrap_or((&name, "bin"));
+            if let Ok(m) = fs::metadata(self.root.join(format::asset_rel_path(sha, ext))) {
+                count += 1;
+                bytes += m.len();
+            }
+        }
+        PhotoBackup { count, bytes }
+    }
+
+    /// Every photo on this device, relative to the vault root
+    /// (`assets/ab/….jpg`), for exporting.
+    pub fn local_photos(&self) -> Vec<String> {
+        self.asset_rel_paths()
+    }
+
     /// Upload queued images to S3. Returns how many were uploaded.
     pub fn upload_pending(&self, s3_credentials: S3Credentials) -> Result<u32> {
         let cfg = self.config();
+        if cfg.image_storage != ImageStorage::S3 {
+            return Ok(0);
+        }
         let Some(s3) = cfg.s3 else { return Ok(0) };
         let client = S3Client::new(s3, s3_credentials);
         let mut pending = self.pending_uploads();
@@ -1201,7 +1105,7 @@ impl Vault {
             });
         }
         let mut report = SyncReport::default();
-        if let Some(c) = s3_credentials {
+        if let (ImageStorage::S3, Some(c)) = (self.config().image_storage, s3_credentials) {
             report.uploaded_assets = self.upload_pending(c)?;
         }
         let repo = self.repo();
@@ -1351,6 +1255,30 @@ impl Vault {
         }
         Ok(())
     }
+}
+
+/// True for git hosts with storage quotas (GitHub, GitLab, Bitbucket), where
+/// committing photos fills the repo quickly.
+#[uniffi::export]
+pub fn is_hosted_git_remote(url: String) -> bool {
+    let u = url.trim().to_lowercase();
+    let host = if let Some(rest) = u.split_once("://").map(|(_, r)| r) {
+        rest.split(['/', ':'])
+            .next()
+            .unwrap_or("")
+            .rsplit('@')
+            .next()
+            .unwrap_or("")
+            .to_string()
+    } else if let Some((user_host, _)) = u.split_once(':') {
+        // scp-like: git@github.com:owner/repo.git
+        user_host.rsplit('@').next().unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+    ["github.com", "gitlab.com", "bitbucket.org"]
+        .iter()
+        .any(|h| host == *h || host.ends_with(&format!(".{h}")))
 }
 
 fn remote_callbacks(

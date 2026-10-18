@@ -1,4 +1,4 @@
-package io.github.asward.fieldlog.session
+package io.github.asward.fieldlog.media
 
 import android.content.Context
 import androidx.camera.core.CameraSelector
@@ -12,7 +12,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import java.util.concurrent.Executors
 
-/** In-app camera so "snap" captures immediately, without leaving the session. */
+/** In-app camera so "snap" captures immediately, without leaving the log screen. */
 class Camera(private val context: Context, private val owner: LifecycleOwner) {
     val previewView = PreviewView(context).apply {
         scaleType = PreviewView.ScaleType.FILL_CENTER

@@ -3,6 +3,9 @@
 package io.github.asward.fieldlog.ui
 
 import android.os.Build
+import android.text.format.Formatter
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -32,6 +35,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,6 +50,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import io.github.asward.fieldlog.data.ConnectionFile
+import io.github.asward.fieldlog.data.PhotoExport
+import io.github.asward.fieldlog.feedback.Cue
+import io.github.asward.fieldlog.feedback.Feedback
 import io.github.asward.fieldlog.data.VaultSecrets
 import io.github.asward.fieldlog.sync.SyncWorker
 import io.github.asward.fieldlog.userMessage
@@ -59,6 +67,7 @@ import uniffi.fieldlog_core.Author
 import uniffi.fieldlog_core.ImageStorage
 import uniffi.fieldlog_core.S3Config
 import uniffi.fieldlog_core.generateSshKey
+import uniffi.fieldlog_core.isHostedGitRemote
 import uniffi.fieldlog_core.libgitInfo
 
 @Composable
@@ -79,16 +88,22 @@ fun SettingsScreen(nav: Nav) {
     val author = remember { vaults.author }
     var name by remember { mutableStateOf(author.name) }
     var email by remember { mutableStateOf(author.email) }
-    var prefix by remember { mutableStateOf(vaults.commandPrefix) }
-    var silence by remember { mutableStateOf(vaults.silenceTimeoutSecs.toFloat()) }
+    var idle by remember { mutableStateOf(vaults.idleMinutes.toFloat()) }
     var volumeKeys by remember { mutableStateOf(vaults.volumeKeys) }
+    var fbSound by remember { mutableStateOf(vaults.feedbackSound) }
+    var fbVolume by remember { mutableStateOf(vaults.feedbackVolume) }
+    var fbHaptics by remember { mutableStateOf(vaults.feedbackHaptics) }
+    val feedback = remember { Feedback(context) }
+    DisposableEffect(Unit) { onDispose { feedback.release() } }
     val list = remember(version) { vaults.list() }
 
     fun save() {
         vaults.author = Author(name.trim().ifEmpty { "FieldLog" }, email.trim().ifEmpty { "fieldlog@localhost" })
-        vaults.commandPrefix = prefix
-        vaults.silenceTimeoutSecs = silence.roundToInt()
+        vaults.idleMinutes = idle.roundToInt()
         vaults.volumeKeys = volumeKeys
+        vaults.feedbackSound = fbSound
+        vaults.feedbackVolume = fbVolume
+        vaults.feedbackHaptics = fbHaptics
     }
 
     Scaffold(topBar = {
@@ -99,29 +114,51 @@ fun SettingsScreen(nav: Nav) {
                 .verticalScroll(rememberScrollState()),
         ) {
             Section("Voice")
-            OutlinedTextField(
-                prefix, { prefix = it }, label = { Text("Command prefix") }, singleLine = true,
-                supportingText = {
-                    Text(
-                        "Leave empty to use bare commands (“next”), which only fire when said on their own. " +
-                            "Set e.g. “log” if commands misfire, then say “log next”.",
-                    )
-                },
-                modifier = Modifier.fillMaxWidth(),
+            ListItem(
+                modifier = Modifier.clickable { save(); nav.push(Screen.Speech) },
+                headlineContent = { Text("Speech recognition") },
+                supportingContent = { Text("${vaults.speechSetup.label} · run the speech check") },
             )
-            val secs = silence.roundToInt()
-            Text(
-                if (secs == 0) "Auto-save on silence: off" else "Auto-save after ${secs}s of silence",
-                modifier = Modifier.padding(top = 12.dp),
+            ListItem(
+                modifier = Modifier.clickable { save(); nav.push(Screen.Phrases) },
+                headlineContent = { Text("Command phrases") },
+                supportingContent = { Text("What to say for note, end note, snap, end log…") },
             )
-            Slider(value = silence, onValueChange = { silence = it }, valueRange = 0f..120f, steps = 11)
+            val mins = idle.roundToInt()
+            Text("Stop the mic after $mins min without speech", modifier = Modifier.padding(top = 12.dp))
+            Text("The log stays open; a notification lets you resume or end it.", style = MaterialTheme.typography.bodySmall)
+            Slider(value = idle, onValueChange = { idle = it }, valueRange = 5f..60f, steps = 10)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Volume keys in sessions")
+                    Text("Volume keys on the log screen")
                     Text("Up takes a photo, down mutes or unmutes the mic.", style = MaterialTheme.typography.bodySmall)
                 }
                 Switch(checked = volumeKeys, onCheckedChange = { volumeKeys = it })
             }
+
+            Section("Feedback")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Sounds")
+                    Text("A short sound for every mode change and save.", style = MaterialTheme.typography.bodySmall)
+                }
+                Switch(checked = fbSound, onCheckedChange = { fbSound = it })
+            }
+            if (fbSound) {
+                Text("Sound volume", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
+                Slider(value = fbVolume, onValueChange = { fbVolume = it }, valueRange = 0.1f..1f)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Vibration")
+                    Text("A distinct pattern per mode, so you can tell without looking.", style = MaterialTheme.typography.bodySmall)
+                }
+                Switch(checked = fbHaptics, onCheckedChange = { fbHaptics = it })
+            }
+            TextButton(onClick = {
+                save()
+                feedback.play(Cue.ENTER_NOTE)
+            }) { Text("Try it") }
 
             Section("Commit author")
             OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -180,7 +217,18 @@ fun VaultSetupScreen(nav: Nav, vaultId: String?) {
     var showPaste by remember { mutableStateOf(false) }
     var httpsUser by remember { mutableStateOf(secrets.httpsUsername ?: "") }
     var httpsToken by remember { mutableStateOf(secrets.httpsToken ?: "") }
-    var s3Mode by remember { mutableStateOf(config?.imageStorage == ImageStorage.S3) }
+    var storage by remember { mutableStateOf(config?.imageStorage ?: ImageStorage.LOCAL) }
+    val s3Mode = storage == ImageStorage.S3
+    val backup = remember { if (editing) runCatching { vaults.open(id).photoBackup() }.getOrNull() else null }
+    val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val r = withContext(Dispatchers.IO) { runCatching { PhotoExport.write(context, id, uri) } }
+                r.onSuccess { n -> context.toast(if (n == 1) "Exported 1 photo" else "Exported $n photos") }
+                    .onFailure { context.toast(it.userMessage()) }
+            }
+        }
+    }
     var s3Endpoint by remember { mutableStateOf(config?.s3?.endpoint ?: "https://s3.us-east-1.amazonaws.com") }
     var s3Region by remember { mutableStateOf(config?.s3?.region ?: "us-east-1") }
     var s3Bucket by remember { mutableStateOf(config?.s3?.bucket ?: "") }
@@ -191,6 +239,30 @@ fun VaultSetupScreen(nav: Nav, vaultId: String?) {
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmRemove by remember { mutableStateOf(false) }
+    val connectionOut = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val r = withContext(Dispatchers.IO) { runCatching { ConnectionFile.export(context, id, uri) } }
+                r.onSuccess { context.toast("Saved. It contains your private key: keep it private, delete it after importing.") }
+                    .onFailure { context.toast(it.userMessage()) }
+            }
+        }
+    }
+    val connectionIn = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            busy = true
+            error = null
+            scope.launch {
+                val r = withContext(Dispatchers.IO) { runCatching { ConnectionFile.import(context, uri) } }
+                busy = false
+                r.onSuccess { name ->
+                    context.toast("Connected “$name”")
+                    nav.changed()
+                    nav.home()
+                }.onFailure { error = it.userMessage() }
+            }
+        }
+    }
 
     fun currentSecrets() = VaultSecrets(
         sshPrivateKey = privateKey.trim().ifEmpty { null }.takeIf { !useHttps },
@@ -222,6 +294,14 @@ fun VaultSetupScreen(nav: Nav, vaultId: String?) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (!editing) {
+                OutlinedButton(enabled = !busy, onClick = { connectionIn.launch(arrayOf("application/json", "*/*")) }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Import connection file")
+                }
+                Text(
+                    "Reconnect a vault exported from another install (remote, keys, pinned host key); no new deploy key needed.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
                 OutlinedTextField(name, { name = it }, label = { Text("Vault name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -290,12 +370,43 @@ fun VaultSetupScreen(nav: Nav, vaultId: String?) {
 
             if (editing) {
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Store photos in S3")
-                        Text("Keeps images out of git. Off: photos are committed to the repo.", style = MaterialTheme.typography.bodySmall)
+                Text("Photo storage", style = MaterialTheme.typography.titleSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(selected = storage == ImageStorage.LOCAL, onClick = { storage = ImageStorage.LOCAL }, label = { Text("This phone") })
+                    FilterChip(selected = storage == ImageStorage.S3, onClick = { storage = ImageStorage.S3 }, label = { Text("S3 / R2") })
+                    FilterChip(selected = storage == ImageStorage.GIT, onClick = { storage = ImageStorage.GIT }, label = { Text("Git") })
+                }
+                Text(
+                    when (storage) {
+                        ImageStorage.LOCAL -> "Photos stay on this phone and are queued for upload. When you set up S3 or R2, " +
+                            "they upload with the same names, so nothing in the repo changes."
+                        ImageStorage.S3 -> "Photos upload to your bucket (S3, Cloudflare R2, MinIO…) before every push and stay out of git."
+                        ImageStorage.GIT -> "Photos are committed to the repo with each log. Best for self-hosted remotes."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (storage == ImageStorage.GIT && useRemote && isHostedGitRemote(url)) {
+                    Text(
+                        "This remote has a storage quota. Committing photos will fill it quickly; " +
+                            "“This phone” or S3 / R2 is a better fit.",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                if (backup != null && backup.count > 0u) {
+                    Card(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(12.dp)) {
+                            Text(
+                                "${backup.count} photo${if (backup.count == 1u) "" else "s"} not backed up " +
+                                    "(${Formatter.formatShortFileSize(context, backup.bytes.toLong())})",
+                            )
+                            Text(
+                                "They live only in this app's storage. Uninstalling the app or clearing its data deletes them.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            TextButton(onClick = { exporter.launch("fieldlog-photos.zip") }) { Text("Export photos") }
+                        }
                     }
-                    Switch(checked = s3Mode, onCheckedChange = { s3Mode = it })
                 }
                 if (s3Mode) {
                     OutlinedTextField(s3Endpoint, { s3Endpoint = it }, label = { Text("Endpoint") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -336,7 +447,7 @@ fun VaultSetupScreen(nav: Nav, vaultId: String?) {
                             val v = vaults.open(id)
                             val cfg = v.config()
                             val newCfg = cfg.copy(
-                                imageStorage = if (s3Mode) ImageStorage.S3 else ImageStorage.GIT,
+                                imageStorage = storage,
                                 s3 = if (s3Mode) S3Config(s3Endpoint.trim(), s3Region.trim(), s3Bucket.trim(), s3Prefix.trim(), s3PathStyle) else cfg.s3,
                             )
                             if (newCfg != cfg) v.setConfig(newCfg)
@@ -357,6 +468,15 @@ fun VaultSetupScreen(nav: Nav, vaultId: String?) {
             if (!editing && useRemote) {
                 Text(
                     "Connect clones the repo. An empty repo becomes a new vault.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (editing && rec?.remoteUrl != null) {
+                OutlinedButton(onClick = { connectionOut.launch("fieldlog-connection-${rec.name}.json") }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Export connection file")
+                }
+                Text(
+                    "For reinstalling: saves the remote, keys and pinned host key (not settings). The file contains your private key.",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

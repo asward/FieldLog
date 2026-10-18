@@ -2,7 +2,10 @@ package io.github.asward.fieldlog.data
 
 import android.content.Context
 import android.content.SharedPreferences
-import io.github.asward.fieldlog.entry.SessionWidget
+import android.os.Build
+import io.github.asward.fieldlog.entry.LogWidget
+import io.github.asward.fieldlog.speech.SpeechResult
+import io.github.asward.fieldlog.speech.SpeechSetup
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -10,9 +13,9 @@ import java.util.UUID
 import uniffi.fieldlog_core.Author
 import uniffi.fieldlog_core.GitCredentials
 import uniffi.fieldlog_core.S3Credentials
-import uniffi.fieldlog_core.Session
-import uniffi.fieldlog_core.SessionSettings
 import uniffi.fieldlog_core.Vault
+import uniffi.fieldlog_core.VoicePhrases
+import uniffi.fieldlog_core.defaultVoicePhrases
 
 /** A vault known to this device. Secrets live in [SecretStore], not here. */
 data class VaultRecord(
@@ -82,7 +85,7 @@ class Vaults(private val context: Context) {
             ?: list().firstOrNull()?.id
         set(v) {
             prefs.edit().putString(KEY_CURRENT, v).apply()
-            SessionWidget.refresh(context)
+            LogWidget.refresh(context)
         }
 
     fun current(): VaultRecord? = currentId?.let(::get)
@@ -101,31 +104,61 @@ class Vaults(private val context: Context) {
             synchronized(opened) { opened.values.forEach { it.setAuthor(a) } }
         }
 
-    /** Spoken prefix for commands ("log"); empty = bare commands. */
-    var commandPrefix: String
-        get() = prefs.getString("command_prefix", "") ?: ""
-        set(v) = prefs.edit().putString("command_prefix", v.trim()).apply()
+    /** Spoken phrases per command (spec §3), stored on this device. */
+    var voicePhrases: VoicePhrases
+        get() = prefs.getString("voice_phrases", null)?.let(::phrasesFromJson) ?: defaultVoicePhrases()
+        set(v) = prefs.edit().putString("voice_phrases", phrasesToJson(v)).apply()
 
-    var silenceTimeoutSecs: Int
-        get() = prefs.getInt("silence_secs", 30)
-        set(v) = prefs.edit().putInt("silence_secs", v).apply()
+    fun resetVoicePhrases() = prefs.edit().remove("voice_phrases").apply()
 
-    fun sessionSettings() = SessionSettings(
-        commandPrefix.takeIf { it.isNotBlank() },
-        silenceTimeoutSecs.coerceAtLeast(0).toUInt(),
-    )
+    /** Stop the mic after this many minutes without speech; the log stays open. */
+    var idleMinutes: Int
+        get() = prefs.getInt("idle_minutes", 20)
+        set(v) = prefs.edit().putInt("idle_minutes", v.coerceIn(1, 240)).apply()
 
-    /** Volume keys act as shutter (up) and mic toggle (down) during a session. */
+    /** Recogniser and listening mode, chosen in Settings → Speech. */
+    var speechSetup: SpeechSetup
+        get() = SpeechSetup.parse(prefs.getString("speech_setup", null)) ?: SpeechSetup.DEFAULT
+        set(v) = prefs.edit().putString("speech_setup", v.key).apply()
+
+    /** Last speech-check results on this phone. */
+    var speechResults: List<SpeechResult>
+        get() = SpeechResult.listFromJson(prefs.getString("speech_results", null))
+        set(v) = prefs.edit().putString("speech_results", SpeechResult.listToJson(v)).apply()
+
+    /** The speech check has run (or was dismissed) on this phone. */
+    val speechChecked: Boolean get() = prefs.contains("speech_results")
+
+    fun dismissSpeechCheck() {
+        if (!speechChecked) prefs.edit().putString("speech_results", "[]").apply()
+    }
+
+    // Feedback (spec §8): earcons and vibration for every state change.
+    var feedbackSound: Boolean
+        get() = prefs.getBoolean("fb_sound", true)
+        set(v) = prefs.edit().putBoolean("fb_sound", v).apply()
+
+    /** 0..1, relative to the device's sonification volume. */
+    var feedbackVolume: Float
+        get() = prefs.getFloat("fb_volume", 0.8f)
+        set(v) = prefs.edit().putFloat("fb_volume", v.coerceIn(0f, 1f)).apply()
+
+    var feedbackHaptics: Boolean
+        get() = prefs.getBoolean("fb_haptics", true)
+        set(v) = prefs.edit().putBoolean("fb_haptics", v).apply()
+
+    /** Volume keys act as shutter (up) and mic toggle (down) on the log screen. */
     var volumeKeys: Boolean
         get() = prefs.getBoolean("volume_keys", true)
         set(v) = prefs.edit().putBoolean("volume_keys", v).apply()
 
-    fun stickyProject(vaultId: String): String? = prefs.getString("sticky_$vaultId", null)
+    /** The active project: picked by tapping it; New log and entry points use it. */
+    fun activeProject(vaultId: String): String? = prefs.getString("sticky_$vaultId", null)
 
-    fun setStickyProject(vaultId: String, project: String) {
+    fun setActiveProject(vaultId: String, project: String) {
         prefs.edit().putString("sticky_$vaultId", project).apply()
         touchRecent(vaultId, project)
-        SessionWidget.refresh(context)
+        LogWidget.refresh(context)
     }
 
     /** Most recently used projects in a vault, newest first. */
@@ -181,14 +214,14 @@ class Vaults(private val context: Context) {
     // ------------------------------------------------------------ core objects
 
     fun open(id: String): Vault = synchronized(opened) {
-        opened.getOrPut(id) { Vault.open(dir(id).absolutePath, author) }
+        opened.getOrPut(id) { Vault.open(dir(id).absolutePath, author).also(::named) }
     }
 
     fun openCurrent(): Vault? = currentId?.let(::open)
 
     fun createLocal(name: String): VaultRecord {
         val rec = VaultRecord(UUID.randomUUID().toString(), name.trim().ifEmpty { "Notes" })
-        val v = Vault.create(dir(rec.id).absolutePath, rec.name, author)
+        val v = Vault.create(dir(rec.id).absolutePath, rec.name, author).also(::named)
         synchronized(opened) { opened[rec.id] = v }
         save(list() + rec)
         currentId = rec.id
@@ -196,10 +229,12 @@ class Vaults(private val context: Context) {
     }
 
     /** Clone `url` into a new vault. Secrets must be stored first under [id]. */
-    fun cloneRemote(id: String, name: String, url: String): VaultRecord {
+    fun cloneRemote(id: String, name: String, url: String, knownHost: String? = null): VaultRecord {
         val dir = dir(id)
         dir.deleteRecursively()
-        val v = Vault.cloneRemote(url, dir.absolutePath, name.trim().ifEmpty { "Notes" }, gitCredentials(id), author)
+        val creds = gitCredentials(id).let { if (knownHost != null) it.copy(knownHostSha256 = knownHost) else it }
+        val v = Vault.cloneRemote(url, dir.absolutePath, name.trim().ifEmpty { "Notes" }, creds, author)
+            .also(::named)
         val rec = VaultRecord(id, v.config().name, url)
         synchronized(opened) { opened[id] = v }
         save(list().filter { it.id != id } + rec)
@@ -220,11 +255,48 @@ class Vaults(private val context: Context) {
         save(list().filter { it.id != id })
     }
 
-    fun newSession(vaultId: String, project: String): Session =
-        Session(open(vaultId), project, sessionSettings())
+    /** Conflict copies are named after the device, e.g. `….conflict-pixel-8-….md`. */
+    private fun named(v: Vault) = v.setDeviceName(Build.MODEL ?: "phone")
 
     private companion object {
         const val KEY_VAULTS = "vaults"
         const val KEY_CURRENT = "current_vault"
+
+        fun phrasesToJson(p: VoicePhrases): String = JSONObject().apply {
+            put("note", JSONArray(p.note))
+            put("endNote", JSONArray(p.endNote))
+            put("tag", JSONArray(p.tag))
+            put("endTags", JSONArray(p.endTags))
+            put("snap", JSONArray(p.snap))
+            put("endAnnotation", JSONArray(p.endAnnotation))
+            put("endMarkup", JSONArray(p.endMarkup))
+            put("scratchThat", JSONArray(p.scratchThat))
+            put("cancel", JSONArray(p.cancel))
+            put("undo", JSONArray(p.undo))
+            put("endLog", JSONArray(p.endLog))
+        }.toString()
+
+        fun phrasesFromJson(s: String): VoicePhrases? = runCatching {
+            val o = JSONObject(s)
+            val d = defaultVoicePhrases()
+            fun list(key: String, fallback: List<String>): List<String> {
+                val a = o.optJSONArray(key) ?: return fallback
+                val l = (0 until a.length()).map { a.getString(it).trim() }.filter { it.isNotEmpty() }
+                return l.ifEmpty { fallback }
+            }
+            VoicePhrases(
+                note = list("note", d.note),
+                endNote = list("endNote", d.endNote),
+                tag = list("tag", d.tag),
+                endTags = list("endTags", d.endTags),
+                snap = list("snap", d.snap),
+                endAnnotation = list("endAnnotation", d.endAnnotation),
+                endMarkup = list("endMarkup", d.endMarkup),
+                scratchThat = list("scratchThat", d.scratchThat),
+                cancel = list("cancel", d.cancel),
+                undo = list("undo", d.undo),
+                endLog = list("endLog", d.endLog),
+            )
+        }.getOrNull()
     }
 }

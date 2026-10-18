@@ -14,12 +14,35 @@ android {
         applicationId = "io.github.asward.fieldlog"
         minSdk = 28
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // Each CI build counts as newer, so it installs over the last one.
+        val run = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
+        versionCode = run ?: 1
+        versionName = if (run != null) "0.2.0-dev.$run" else "0.2.0-local"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
 
+    // Dev builds from CI sign with a fixed key kept in GitHub Actions secrets
+    // (see .github/workflows/ci.yml), so each new APK installs as an update
+    // instead of forcing an uninstall that wipes vaults and keys. The key is
+    // never committed. Without it (local builds, fork PRs) the normal
+    // per-machine debug key is used.
+    val devKeystore = System.getenv("FIELDLOG_DEV_KEYSTORE")?.let { file(it) }?.takeIf { it.isFile }
+    val devPassword = System.getenv("FIELDLOG_DEV_KEYSTORE_PASSWORD")
+    signingConfigs {
+        if (devKeystore != null && devPassword != null) {
+            create("dev") {
+                storeFile = devKeystore
+                storePassword = devPassword
+                keyAlias = "fieldlog-dev"
+                keyPassword = devPassword
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfigs.findByName("dev")?.let { signingConfig = it }
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

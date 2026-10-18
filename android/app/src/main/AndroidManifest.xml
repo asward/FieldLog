@@ -5,6 +5,11 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Listening continues with the screen locked (spec §9). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
@@ -34,14 +39,23 @@
         </activity>
 
         <activity
-            android:name=".session.SessionActivity"
+            android:name=".log.LogActivity"
             android:exported="false"
             android:launchMode="singleTask"
-            android:taskAffinity="io.github.asward.fieldlog.session"
+            android:taskAffinity="io.github.asward.fieldlog.log"
             android:excludeFromRecents="false"
             android:screenOrientation="portrait"
             android:showWhenLocked="true"
             android:turnScreenOn="true" />
+
+        <service
+            android:name=".log.LogService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <receiver
+            android:name=".log.LogActionReceiver"
+            android:exported="false" />
 
         <activity
             android:name=".share.ShareActivity"
@@ -66,7 +80,7 @@
         </activity>
 
         <service
-            android:name=".entry.SessionTileService"
+            android:name=".entry.LogTileService"
             android:exported="true"
             android:icon="@drawable/ic_tile"
             android:label="@string/tile_label"
@@ -80,14 +94,14 @@
         </service>
 
         <receiver
-            android:name=".entry.SessionWidget"
+            android:name=".entry.LogWidget"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
             </intent-filter>
             <meta-data
                 android:name="android.appwidget.provider"
-                android:resource="@xml/widget_session_info" />
+                android:resource="@xml/widget_log_info" />
         </receiver>
     </application>
 </manifest>

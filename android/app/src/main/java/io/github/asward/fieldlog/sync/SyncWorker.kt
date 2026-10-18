@@ -20,6 +20,7 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import uniffi.fieldlog_core.CoreException
+import uniffi.fieldlog_core.SyncReport
 
 /** Pull, merge and push vaults that have a remote. Upload pending images first. */
 class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
@@ -33,13 +34,10 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             if (rec.remoteUrl == null) continue
             val now = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date())
             try {
-                val report = vaults.open(rec.id).sync(vaults.gitCredentials(rec.id), vaults.s3Credentials(rec.id))
-                val seen = report.hostKeySha256
-                if (rec.hostKey == null && seen != null) {
-                    // Trust on first use: pin the key we just saw.
-                    vaults.update(rec.copy(hostKey = seen))
-                }
-                vaults.setLastSync(rec.id, "Synced $now")
+                syncNow(applicationContext, rec.id)
+            } catch (e: CoreException.LogOpen) {
+                // Background sync waits for the open log; `end log` syncs it.
+                vaults.setLastSync(rec.id, "Sync paused while a log is open")
             } catch (e: CoreException.Conflict) {
                 vaults.setLastSync(rec.id, "Sync failed $now: ${e.userMessage()}")
             } catch (e: CoreException.HostKeyMismatch) {
@@ -54,6 +52,29 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
     companion object {
         private const val KEY_VAULT = "vault"
+
+        /**
+         * Pull, merge and push one vault now (blocking). Pins the SSH host key on
+         * first use and records the status line. Throws on failure.
+         */
+        fun syncNow(context: Context, vaultId: String): SyncReport {
+            val vaults = context.vaults
+            val rec = vaults.get(vaultId) ?: error("Vault not found")
+            val report = vaults.open(vaultId).sync(vaults.gitCredentials(vaultId), vaults.s3Credentials(vaultId))
+            val seen = report.hostKeySha256
+            if (rec.hostKey == null && seen != null) {
+                // Trust on first use: pin the key we just saw.
+                vaults.update(rec.copy(hostKey = seen))
+            }
+            val now = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date())
+            val conflicts = report.conflictCopies.size
+            vaults.setLastSync(
+                vaultId,
+                if (conflicts > 0) "Synced $now · $conflicts log${if (conflicts == 1) "" else "s"} edited on two devices; both kept"
+                else "Synced $now",
+            )
+            return report
+        }
         private val network = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
         /** Sync soon. Repeated calls within the delay collapse into one run. */
