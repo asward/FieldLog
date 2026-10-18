@@ -78,6 +78,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.fieldlog_core.EntrySummary
+import uniffi.fieldlog_core.ImageStorage
 import uniffi.fieldlog_core.ProjectInfo
 
 /** Run [block] on IO whenever [keys] change. `null` while loading. */
@@ -113,6 +114,7 @@ private data class HomeData(
     val hasRemote: Boolean,
     val unpushed: UInt,
     val pendingUploads: UInt,
+    val localOnly: Boolean,
     val lastSync: String?,
 )
 
@@ -140,7 +142,8 @@ fun HomeScreen(nav: Nav) {
             sticky = vaults.stickyProject(currentId),
             hasRemote = v.hasRemote(),
             unpushed = v.unpushedCommits(),
-            pendingUploads = v.pendingUploadCount(),
+            pendingUploads = v.photoBackup().count,
+            localOnly = v.config().imageStorage == ImageStorage.LOCAL,
             lastSync = vaults.lastSync(currentId),
         )
     }
@@ -293,7 +296,9 @@ private fun SyncLine(d: HomeData) {
             d.lastSync?.let(::add)
             if (d.unpushed > 0u) add("${d.unpushed} to push")
         }
-        if (d.pendingUploads > 0u) add("${d.pendingUploads} photos to upload")
+        if (d.pendingUploads > 0u) {
+            add(if (d.localOnly) "${d.pendingUploads} photos only on this phone" else "${d.pendingUploads} photos to upload")
+        }
     }
     if (parts.isNotEmpty()) {
         Text(
