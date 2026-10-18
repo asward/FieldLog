@@ -72,7 +72,7 @@ Gradle runs `scripts/build-core-android.sh`, which cross-compiles the core and g
 
 ### Installing new builds
 
-Debug builds are signed with a fixed dev key (`android/app/dev-debug.keystore`, committed on purpose; it signs nothing else), and the version code is the CI run number, so a newer APK installs over the old one and keeps vaults, keys and settings.
+CI signs debug builds with a fixed dev key held in the repo's Actions secrets (`FIELDLOG_DEBUG_KEYSTORE_B64`, `FIELDLOG_DEBUG_KEYSTORE_PASSWORD`; alias `fieldlog-dev`), and the version code is the CI run number, so a newer APK installs over the old one and keeps vaults, keys and settings. The key is never committed. Local builds use your machine's debug key unless you point `FIELDLOG_DEV_KEYSTORE` and `FIELDLOG_DEV_KEYSTORE_PASSWORD` at the dev keystore.
 
 If you ever have to uninstall (e.g. coming from a build signed with a different key): first open the vault's settings → **Export connection file**, then after reinstalling choose **Set up a vault → Import connection file**. It reconnects the remote with the same deploy key and pinned host key; app settings start fresh. The file contains your private key, so keep it private and delete it afterwards. Photos kept only on the phone are lost on uninstall unless exported first.
 

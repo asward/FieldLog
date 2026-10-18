@@ -51,6 +51,22 @@ jobs:
       - name: Select NDK
         run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
       - uses: gradle/actions/setup-gradle@v4
+      - name: Dev signing key
+        # Fixed key so successive dev APKs install as updates. Absent on fork
+        # PRs; the build then falls back to the runner's debug key.
+        env:
+          KEYSTORE_B64: ${{ secrets.FIELDLOG_DEBUG_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.FIELDLOG_DEBUG_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/fieldlog-dev.keystore"
+            echo "FIELDLOG_DEV_KEYSTORE=$RUNNER_TEMP/fieldlog-dev.keystore" >> "$GITHUB_ENV"
+            echo "::add-mask::$KEYSTORE_PASSWORD"
+            echo "FIELDLOG_DEV_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "Signing with the FieldLog dev key"
+          else
+            echo "::warning title=Unsigned dev build::FIELDLOG_DEBUG_KEYSTORE_B64 / _PASSWORD secrets not set; this APK won't install over earlier builds."
+          fi
       - name: Build APK
         working-directory: android
         run: |

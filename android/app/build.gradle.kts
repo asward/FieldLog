@@ -21,21 +21,27 @@ android {
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
 
-    // A fixed debug key (committed; dev only, not a secret) so every build,
-    // from CI or locally, signs the same way and installs as an update
-    // instead of forcing an uninstall that wipes vaults and keys.
+    // Dev builds from CI sign with a fixed key kept in GitHub Actions secrets
+    // (see .github/workflows/ci.yml), so each new APK installs as an update
+    // instead of forcing an uninstall that wipes vaults and keys. The key is
+    // never committed. Without it (local builds, fork PRs) the normal
+    // per-machine debug key is used.
+    val devKeystore = System.getenv("FIELDLOG_DEV_KEYSTORE")?.let { file(it) }?.takeIf { it.isFile }
+    val devPassword = System.getenv("FIELDLOG_DEV_KEYSTORE_PASSWORD")
     signingConfigs {
-        getByName("debug") {
-            storeFile = file("dev-debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+        if (devKeystore != null && devPassword != null) {
+            create("dev") {
+                storeFile = devKeystore
+                storePassword = devPassword
+                keyAlias = "fieldlog-dev"
+                keyPassword = devPassword
+            }
         }
     }
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfigs.findByName("dev")?.let { signingConfig = it }
         }
         release {
             isMinifyEnabled = false
