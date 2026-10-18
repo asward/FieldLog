@@ -7,6 +7,7 @@ uniffi::setup_scaffolding!();
 mod error;
 mod format;
 mod images;
+mod keys;
 mod s3;
 mod search;
 mod session;
@@ -16,6 +17,7 @@ mod voice;
 
 pub use error::CoreError;
 pub use format::Block;
+pub use keys::*;
 pub use s3::{S3Config, S3Credentials};
 pub use session::*;
 pub use spike::*;
