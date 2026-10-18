@@ -10,6 +10,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.lifecycleScope
+import io.github.asward.fieldlog.speech.SystemTranscriber
+import io.github.asward.fieldlog.speech.Transcriber
+import io.github.asward.fieldlog.speech.TranscriberListener
 import io.github.asward.fieldlog.sync.SyncWorker
 import io.github.asward.fieldlog.userMessage
 import io.github.asward.fieldlog.vaults
@@ -23,6 +26,8 @@ import kotlinx.coroutines.withContext
 import uniffi.fieldlog_core.Command
 import uniffi.fieldlog_core.Session
 import uniffi.fieldlog_core.SessionEvent
+import uniffi.fieldlog_core.VoiceItem
+import uniffi.fieldlog_core.parseUtterance
 
 /**
  * Drives one session: speech in, camera, touch backups, the silence timer,
@@ -49,6 +54,11 @@ class SessionController(
         private set
     var secondsToAutoSave by mutableStateOf<Int?>(null)
         private set
+    /** e.g. "On-device · continuous"; changes if on-device falls back to cloud. */
+    var speechLabel by mutableStateOf("")
+        private set
+    /** Why on-device speech fell back to cloud, until dismissed. */
+    var fallback by mutableStateOf<String?>(null)
 
     private val scope = activity.lifecycleScope
     /** Core calls run one at a time, in order. */
@@ -60,19 +70,79 @@ class SessionController(
     private val shutter = MediaActionSound().apply { load(MediaActionSound.SHUTTER_CLICK) }
 
     val camera = Camera(activity, activity)
-    private val speech = SpeechLoop(
+    private val speech: Transcriber = SystemTranscriber(
         activity,
-        onUtterance = { text -> exec { session.handleUtterance(text) } },
-        onPartial = { partial = it },
-        onActivity = ::touch,
-        onListening = { listening = it },
-        onFatal = { msg ->
-            micOn = false
-            show(msg)
+        activity.vaults.speechSetup,
+        object : TranscriberListener {
+            override fun onFinal(text: String) = onFinalText(text)
+            override fun onPartial(text: String) = onPartialText(text)
+            override fun onSpeechStart() = touch()
+            override fun onListening(on: Boolean) {
+                listening = on
+            }
+            override fun onFallback(message: String) {
+                fallback = message
+                updateLabel()
+            }
+            override fun onFatal(message: String) {
+                micOn = false
+                show(message)
+            }
         },
-    )
+    ).also { it.silenceMs = 1500L }
 
-    val speechAvailable get() = speech.available
+    init {
+        updateLabel()
+    }
+
+    private fun updateLabel() {
+        val engine = speech.activeEngine.label
+        speechLabel = "$engine · ${if (speech.setup.continuous) "continuous" else "restart mode"}"
+    }
+
+    // ------------------------------------------------------------ speech → commands
+
+    /** Command seen in the previous partial; firing needs two in a row. */
+    private var candidate: Command? = null
+    /** Command already fired from partials, and when; its final result is dropped. */
+    private var firedEarly: Pair<Command, Long>? = null
+
+    private fun commandIn(text: String): Command? =
+        (parseUtterance(text, state.settings.commandPrefix).singleOrNull() as? VoiceItem.Command)?.command
+
+    private fun onPartialText(text: String) {
+        partial = text
+        if (text.isBlank()) {
+            candidate = null
+            return
+        }
+        touch()
+        if (firedEarly != null) return
+        val c = commandIn(text)
+        if (c != null && c == candidate) {
+            // Stable across two partials: act now instead of waiting for silence.
+            firedEarly = c to SystemClock.elapsedRealtime()
+            candidate = null
+            partial = ""
+            exec { listOf(session.apply(c)) }
+            return
+        }
+        candidate = c
+    }
+
+    private fun onFinalText(text: String) {
+        candidate = null
+        val early = firedEarly
+        firedEarly = null
+        if (early != null && SystemClock.elapsedRealtime() - early.second < 5000 && commandIn(text) == early.first) {
+            return // already handled from the partial result
+        }
+        exec { session.handleUtterance(text) }
+    }
+
+    val speechAvailable: Boolean
+        get() = io.github.asward.fieldlog.speech.SpeechSupport.unavailableReason(activity, speech.setup) == null ||
+            io.github.asward.fieldlog.speech.SpeechSupport.cloudAvailable(activity)
 
     private fun touch() {
         lastActivity = SystemClock.elapsedRealtime()
@@ -110,7 +180,7 @@ class SessionController(
 
     fun onResume(hasMicPermission: Boolean) {
         touch()
-        if (micOn && hasMicPermission && speech.available) speech.start()
+        if (micOn && hasMicPermission && speechAvailable) speech.start()
         ticker?.cancel()
         ticker = scope.launch { silenceLoop() }
     }

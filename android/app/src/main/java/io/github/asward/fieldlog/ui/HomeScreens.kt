@@ -209,6 +209,23 @@ fun HomeScreen(nav: Nav) {
             }
             if (d != null) {
                 item { SyncLine(d) }
+                if (!vaults.speechChecked) {
+                    item {
+                        Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                            Column(Modifier.padding(16.dp)) {
+                                Text("Check speech on this phone", style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    "A one-minute test finds the fastest speech setup that works here.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                Row {
+                                    TextButton(onClick = { nav.push(Screen.Speech) }) { Text("Run check") }
+                                    TextButton(onClick = { vaults.dismissSpeechCheck(); nav.changed() }) { Text("Not now") }
+                                }
+                            }
+                        }
+                    }
+                }
                 val sticky = d.projects.firstOrNull { it.slug == d.sticky }
                 if (sticky != null) {
                     item {

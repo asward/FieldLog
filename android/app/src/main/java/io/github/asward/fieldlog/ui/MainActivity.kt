@@ -20,6 +20,7 @@ sealed interface Screen {
     data class Entry(val path: String) : Screen
     data object Search : Screen
     data object Settings : Screen
+    data object Speech : Screen
     /** `vaultId == null` adds a new vault. */
     data class VaultSetup(val vaultId: String?) : Screen
 }
@@ -63,6 +64,7 @@ class MainActivity : ComponentActivity() {
             is Screen.Entry -> EntryScreen(nav, s.path)
             Screen.Search -> SearchScreen(nav)
             Screen.Settings -> SettingsScreen(nav)
+            Screen.Speech -> SpeechScreen(nav)
             is Screen.VaultSetup -> VaultSetupScreen(nav, s.vaultId)
         }
     }

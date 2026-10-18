@@ -3,6 +3,8 @@ package io.github.asward.fieldlog.data
 import android.content.Context
 import android.content.SharedPreferences
 import io.github.asward.fieldlog.entry.SessionWidget
+import io.github.asward.fieldlog.speech.SpeechResult
+import io.github.asward.fieldlog.speech.SpeechSetup
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -114,6 +116,23 @@ class Vaults(private val context: Context) {
         commandPrefix.takeIf { it.isNotBlank() },
         silenceTimeoutSecs.coerceAtLeast(0).toUInt(),
     )
+
+    /** Recogniser and listening mode, chosen in Settings → Speech. */
+    var speechSetup: SpeechSetup
+        get() = SpeechSetup.parse(prefs.getString("speech_setup", null)) ?: SpeechSetup.DEFAULT
+        set(v) = prefs.edit().putString("speech_setup", v.key).apply()
+
+    /** Last speech-check results on this phone. */
+    var speechResults: List<SpeechResult>
+        get() = SpeechResult.listFromJson(prefs.getString("speech_results", null))
+        set(v) = prefs.edit().putString("speech_results", SpeechResult.listToJson(v)).apply()
+
+    /** The speech check has run (or was dismissed) on this phone. */
+    val speechChecked: Boolean get() = prefs.contains("speech_results")
+
+    fun dismissSpeechCheck() {
+        if (!speechChecked) prefs.edit().putString("speech_results", "[]").apply()
+    }
 
     /** Volume keys act as shutter (up) and mic toggle (down) during a session. */
     var volumeKeys: Boolean
