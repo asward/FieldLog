@@ -1,15 +1,14 @@
 package io.github.asward.fieldlog.session
 
-import android.media.AudioManager
-import android.media.MediaActionSound
-import android.media.ToneGenerator
 import android.os.SystemClock
-import android.view.HapticFeedbackConstants
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.lifecycleScope
+import io.github.asward.fieldlog.feedback.Cue
+import io.github.asward.fieldlog.feedback.Feedback
 import io.github.asward.fieldlog.speech.SystemTranscriber
 import io.github.asward.fieldlog.speech.Transcriber
 import io.github.asward.fieldlog.speech.TranscriberListener
@@ -59,6 +58,9 @@ class SessionController(
         private set
     /** Why on-device speech fell back to cloud, until dismissed. */
     var fallback by mutableStateOf<String?>(null)
+    /** Mic level (RMS dB) for the meter. */
+    var level by mutableFloatStateOf(-2f)
+        private set
 
     private val scope = activity.lifecycleScope
     /** Core calls run one at a time, in order. */
@@ -66,8 +68,9 @@ class SessionController(
     private var lastActivity = SystemClock.elapsedRealtime()
     private var ticker: Job? = null
     private var bannerJob: Job? = null
-    private val tones = runCatching { ToneGenerator(AudioManager.STREAM_NOTIFICATION, 70) }.getOrNull()
-    private val shutter = MediaActionSound().apply { load(MediaActionSound.SHUTTER_CLICK) }
+    private val feedback = Feedback(activity)
+    /** "Mic ready" plays once per time the mic is switched on, not on every recogniser restart. */
+    private var readyCued = false
 
     val camera = Camera(activity, activity)
     private val speech: Transcriber = SystemTranscriber(
@@ -79,6 +82,13 @@ class SessionController(
             override fun onSpeechStart() = touch()
             override fun onListening(on: Boolean) {
                 listening = on
+                if (on && !readyCued) {
+                    readyCued = true
+                    feedback.play(Cue.MIC_READY)
+                }
+            }
+            override fun onLevel(rmsDb: Float) {
+                level = rmsDb
             }
             override fun onFallback(message: String) {
                 fallback = message
@@ -154,7 +164,7 @@ class SessionController(
         touch()
         camera.takePhoto(
             onBytes = { bytes ->
-                shutter.play(MediaActionSound.SHUTTER_CLICK)
+                feedback.play(Cue.SNAP)
                 run1 { session.addPhoto(bytes) }
             },
             fail = { msg -> scope.launch { show(msg) } },
@@ -173,6 +183,7 @@ class SessionController(
 
     fun toggleMic() {
         micOn = !micOn
+        readyCued = false
         if (micOn) speech.start() else speech.stop()
     }
 
@@ -187,6 +198,7 @@ class SessionController(
 
     fun onPause() {
         speech.stop()
+        readyCued = false
         ticker?.cancel()
         secondsToAutoSave = null
     }
@@ -194,8 +206,7 @@ class SessionController(
     fun destroy() {
         speech.destroy()
         camera.shutdown()
-        shutter.release()
-        tones?.release()
+        feedback.release()
         core.close()
     }
 
@@ -226,7 +237,10 @@ class SessionController(
         scope.launch {
             val result = withContext(core) { runCatching(block) }
             result.onSuccess { events -> events.forEach(::handle) }
-                .onFailure { show(it.userMessage()) }
+                .onFailure {
+                    feedback.play(Cue.FAILED)
+                    show(it.userMessage())
+                }
             state = withContext(core) { session.state() }
         }
     }
@@ -235,39 +249,29 @@ class SessionController(
         when (e) {
             is SessionEvent.PhotoRequested -> snap()
             is SessionEvent.Committed -> {
-                tone(ToneGenerator.TONE_PROP_ACK)
-                haptic()
+                feedback.play(Cue.COMMITTED)
                 show("Saved: ${e.info.entry.summary.ifEmpty { "photo" }}")
                 SyncWorker.enqueue(activity, vaultId)
                 onCommitted()
             }
             is SessionEvent.NothingToCommit -> show("Nothing to save yet")
             is SessionEvent.Scratched -> {
-                tone(ToneGenerator.TONE_PROP_NACK)
+                feedback.play(Cue.MODE_ENDED)
                 show("Removed “${e.removed}”")
             }
             is SessionEvent.NothingToScratch -> Unit
             is SessionEvent.Undone -> {
-                tone(ToneGenerator.TONE_PROP_NACK)
-                haptic()
+                feedback.play(Cue.MODE_ENDED)
                 show("Undid: ${e.entry.summary}")
                 SyncWorker.enqueue(activity, vaultId)
             }
             is SessionEvent.NothingToUndo -> show("Nothing to undo")
             is SessionEvent.Tagged -> {
-                tone(ToneGenerator.TONE_PROP_BEEP)
+                feedback.play(Cue.ACK)
                 show("#${e.tag}")
             }
             is SessionEvent.TextAdded, is SessionEvent.PhotoAdded -> Unit
         }
-    }
-
-    private fun tone(t: Int) {
-        tones?.startTone(t, 150)
-    }
-
-    private fun haptic() {
-        activity.window?.decorView?.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
     }
 
     private fun show(msg: String) {

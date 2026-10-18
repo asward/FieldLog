@@ -134,6 +134,20 @@ class Vaults(private val context: Context) {
         if (!speechChecked) prefs.edit().putString("speech_results", "[]").apply()
     }
 
+    // Feedback (spec §8): earcons and vibration for every state change.
+    var feedbackSound: Boolean
+        get() = prefs.getBoolean("fb_sound", true)
+        set(v) = prefs.edit().putBoolean("fb_sound", v).apply()
+
+    /** 0..1, relative to the device's sonification volume. */
+    var feedbackVolume: Float
+        get() = prefs.getFloat("fb_volume", 0.8f)
+        set(v) = prefs.edit().putFloat("fb_volume", v.coerceIn(0f, 1f)).apply()
+
+    var feedbackHaptics: Boolean
+        get() = prefs.getBoolean("fb_haptics", true)
+        set(v) = prefs.edit().putBoolean("fb_haptics", v).apply()
+
     /** Volume keys act as shutter (up) and mic toggle (down) during a session. */
     var volumeKeys: Boolean
         get() = prefs.getBoolean("volume_keys", true)

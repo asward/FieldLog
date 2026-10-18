@@ -35,6 +35,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,6 +51,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import io.github.asward.fieldlog.data.PhotoExport
+import io.github.asward.fieldlog.feedback.Cue
+import io.github.asward.fieldlog.feedback.Feedback
 import io.github.asward.fieldlog.data.VaultSecrets
 import io.github.asward.fieldlog.sync.SyncWorker
 import io.github.asward.fieldlog.userMessage
@@ -87,6 +90,11 @@ fun SettingsScreen(nav: Nav) {
     var prefix by remember { mutableStateOf(vaults.commandPrefix) }
     var silence by remember { mutableStateOf(vaults.silenceTimeoutSecs.toFloat()) }
     var volumeKeys by remember { mutableStateOf(vaults.volumeKeys) }
+    var fbSound by remember { mutableStateOf(vaults.feedbackSound) }
+    var fbVolume by remember { mutableStateOf(vaults.feedbackVolume) }
+    var fbHaptics by remember { mutableStateOf(vaults.feedbackHaptics) }
+    val feedback = remember { Feedback(context) }
+    DisposableEffect(Unit) { onDispose { feedback.release() } }
     val list = remember(version) { vaults.list() }
 
     fun save() {
@@ -94,6 +102,9 @@ fun SettingsScreen(nav: Nav) {
         vaults.commandPrefix = prefix
         vaults.silenceTimeoutSecs = silence.roundToInt()
         vaults.volumeKeys = volumeKeys
+        vaults.feedbackSound = fbSound
+        vaults.feedbackVolume = fbVolume
+        vaults.feedbackHaptics = fbHaptics
     }
 
     Scaffold(topBar = {
@@ -132,6 +143,30 @@ fun SettingsScreen(nav: Nav) {
                 }
                 Switch(checked = volumeKeys, onCheckedChange = { volumeKeys = it })
             }
+
+            Section("Feedback")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Sounds")
+                    Text("A short sound for every mode change and save.", style = MaterialTheme.typography.bodySmall)
+                }
+                Switch(checked = fbSound, onCheckedChange = { fbSound = it })
+            }
+            if (fbSound) {
+                Text("Sound volume", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
+                Slider(value = fbVolume, onValueChange = { fbVolume = it }, valueRange = 0.1f..1f)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Vibration")
+                    Text("A distinct pattern per mode, so you can tell without looking.", style = MaterialTheme.typography.bodySmall)
+                }
+                Switch(checked = fbHaptics, onCheckedChange = { fbHaptics = it })
+            }
+            TextButton(onClick = {
+                save()
+                feedback.play(Cue.ENTER_NOTE)
+            }) { Text("Try it") }
 
             Section("Commit author")
             OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
