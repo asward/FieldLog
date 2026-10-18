@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">FieldLog</string>
+    <string name="widget_log">Start logging</string>
+    <string name="widget_snap">Snap a photo</string>
+    <string name="widget_description">Start a session on your current project</string>
+    <string name="tile_label">FieldLog</string>
 </resources>

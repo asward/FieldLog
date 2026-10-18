@@ -260,6 +260,8 @@ fn projects_listing_and_search() {
     assert!(hits[0].snippet.contains("Sistered"));
     let hits = v.search("joist".into(), None, Some("framing".into()), 0);
     assert_eq!(hits.len(), 1);
+    let hits = v.search("#framing".into(), None, None, 0);
+    assert_eq!(hits.len(), 1);
     let hits = v.search("tomatoes".into(), Some("deck-rebuild".into()), None, 0);
     assert!(hits.is_empty());
     let hits = v.search("example.com".into(), None, None, 0);

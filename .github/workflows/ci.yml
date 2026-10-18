@@ -53,7 +53,18 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Build APK
         working-directory: android
-        run: ./gradlew --no-daemon assembleDebug
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon assembleDebug 2>&1 | tee "$RUNNER_TEMP/build.log"
+      - name: Report build errors
+        if: failure()
+        run: |
+          # Surface compiler errors as annotations (readable without log access).
+          log="$RUNNER_TEMP/build.log"
+          [ -f "$log" ] || exit 0
+          { grep -E '^e: |error:|error\[|FAILURE|What went wrong' -A3 "$log" | head -c 30000; echo; echo '--- tail ---'; tail -c 20000 "$log"; } > "$RUNNER_TEMP/errors.txt"
+          msg=$(sed -e 's/%/%25/g' "$RUNNER_TEMP/errors.txt" | sed -e ':a;N;$!ba;s/\r//g;s/\n/%0A/g')
+          echo "::error title=Android build failed::$msg"
       - name: Check native libs are packaged
         run: |
           apk=android/app/build/outputs/apk/debug/app-debug.apk

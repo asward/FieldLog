@@ -27,6 +27,8 @@ hmac = "0.12"
 hex = "0.4"
 getrandom = "0.3"
 walkdir = "2"
+ssh-key = { version = "0.6", default-features = false, features = ["ed25519", "std", "rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]

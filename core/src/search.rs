@@ -45,7 +45,11 @@ pub(crate) fn search(
     tag: Option<&str>,
     limit: u32,
 ) -> Vec<SearchHit> {
-    let terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|t| t.trim_start_matches('#').to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
     let tag = tag.map(format::slugify);
     let mut hits: Vec<SearchHit> = Vec::new();
 
