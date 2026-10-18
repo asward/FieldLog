@@ -378,6 +378,11 @@ private fun Welcome(nav: Nav) {
         Button(onClick = { nav.push(Screen.VaultSetup(null)) }, modifier = Modifier.fillMaxWidth()) {
             Text("Set up a vault")
         }
+        Text(
+            "Reinstalling? Set up a vault → Import connection file.",
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 8.dp),
+        )
     }
 }
 

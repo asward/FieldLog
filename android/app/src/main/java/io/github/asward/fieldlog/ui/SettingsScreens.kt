@@ -50,6 +50,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import io.github.asward.fieldlog.data.ConnectionFile
 import io.github.asward.fieldlog.data.PhotoExport
 import io.github.asward.fieldlog.feedback.Cue
 import io.github.asward.fieldlog.feedback.Feedback
@@ -238,6 +239,30 @@ fun VaultSetupScreen(nav: Nav, vaultId: String?) {
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmRemove by remember { mutableStateOf(false) }
+    val connectionOut = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val r = withContext(Dispatchers.IO) { runCatching { ConnectionFile.export(context, id, uri) } }
+                r.onSuccess { context.toast("Saved. It contains your private key: keep it private, delete it after importing.") }
+                    .onFailure { context.toast(it.userMessage()) }
+            }
+        }
+    }
+    val connectionIn = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            busy = true
+            error = null
+            scope.launch {
+                val r = withContext(Dispatchers.IO) { runCatching { ConnectionFile.import(context, uri) } }
+                busy = false
+                r.onSuccess { name ->
+                    context.toast("Connected “$name”")
+                    nav.changed()
+                    nav.home()
+                }.onFailure { error = it.userMessage() }
+            }
+        }
+    }
 
     fun currentSecrets() = VaultSecrets(
         sshPrivateKey = privateKey.trim().ifEmpty { null }.takeIf { !useHttps },
@@ -269,6 +294,14 @@ fun VaultSetupScreen(nav: Nav, vaultId: String?) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (!editing) {
+                OutlinedButton(enabled = !busy, onClick = { connectionIn.launch(arrayOf("application/json", "*/*")) }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Import connection file")
+                }
+                Text(
+                    "Reconnect a vault exported from another install (remote, keys, pinned host key); no new deploy key needed.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
                 OutlinedTextField(name, { name = it }, label = { Text("Vault name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -435,6 +468,15 @@ fun VaultSetupScreen(nav: Nav, vaultId: String?) {
             if (!editing && useRemote) {
                 Text(
                     "Connect clones the repo. An empty repo becomes a new vault.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (editing && rec?.remoteUrl != null) {
+                OutlinedButton(onClick = { connectionOut.launch("fieldlog-connection-${rec.name}.json") }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Export connection file")
+                }
+                Text(
+                    "For reinstalling: saves the remote, keys and pinned host key (not settings). The file contains your private key.",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

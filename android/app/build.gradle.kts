@@ -14,12 +14,29 @@ android {
         applicationId = "io.github.asward.fieldlog"
         minSdk = 28
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // Each CI build counts as newer, so it installs over the last one.
+        val run = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
+        versionCode = run ?: 1
+        versionName = if (run != null) "0.2.0-dev.$run" else "0.2.0-local"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
 
+    // A fixed debug key (committed; dev only, not a secret) so every build,
+    // from CI or locally, signs the same way and installs as an update
+    // instead of forcing an uninstall that wipes vaults and keys.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("dev-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")

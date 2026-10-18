@@ -229,10 +229,11 @@ class Vaults(private val context: Context) {
     }
 
     /** Clone `url` into a new vault. Secrets must be stored first under [id]. */
-    fun cloneRemote(id: String, name: String, url: String): VaultRecord {
+    fun cloneRemote(id: String, name: String, url: String, knownHost: String? = null): VaultRecord {
         val dir = dir(id)
         dir.deleteRecursively()
-        val v = Vault.cloneRemote(url, dir.absolutePath, name.trim().ifEmpty { "Notes" }, gitCredentials(id), author)
+        val creds = gitCredentials(id).let { if (knownHost != null) it.copy(knownHostSha256 = knownHost) else it }
+        val v = Vault.cloneRemote(url, dir.absolutePath, name.trim().ifEmpty { "Notes" }, creds, author)
             .also(::named)
         val rec = VaultRecord(id, v.config().name, url)
         synchronized(opened) { opened[id] = v }
