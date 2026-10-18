@@ -57,7 +57,7 @@ Rules:
 - **`snap` from NOTE nests.** The photo is inserted inline at that point in the note. After `end markup`, the machine returns to NOTE. Only one level of nesting is allowed.
 - **Command meanings:**
   - `scratch that` removes the last utterance in the current mode.
-  - `cancel` discards the open entry and returns to STANDBY.
+  - `cancel` discards the open entry and returns to STANDBY. For a snap taken inside a note, it discards just that snap and returns to the note.
   - `undo` in STANDBY removes the last entry of the open log.
 - **No auto-commit.** The v1 silence timeout is removed. After 20 minutes idle (configurable), the mic stops and a notification reads "Log open: resume or end". The log stays open.
 - **The state machine lives in the Rust core.** It is pure: utterance in, events out. Android, and later iOS, only render state and play feedback.
@@ -138,7 +138,7 @@ Rot goes about two feet in.
 
 ![](../../../assets/9c/9c04…e1.jpg)
 
-Joist end under the door, soft to a screwdriver.
+> Joist end under the door, soft to a screwdriver.
 
 ```fieldlog-markup
 circle: dark area at joist end
@@ -148,6 +148,7 @@ arrow: water path from door sill
 
 - **Entry headings** use the form `## HH:MM:SS Note|Snap`. They are the parser's anchors; edits made outside the app must keep them.
 - **`photos`** lists every image in body order, as in v1.
+- **Annotation** follows its photo as a `>` quote, so a photo inside a note keeps its annotation apart from the note text.
 - **Markup** goes in a `fieldlog-markup` fenced block so later tooling can find it without parsing prose.
 - **Unknown front-matter keys** are preserved, as in v1.
 
