@@ -2,6 +2,7 @@ package io.github.asward.fieldlog.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import io.github.asward.fieldlog.entry.SessionWidget
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -79,7 +80,10 @@ class Vaults(private val context: Context) {
     var currentId: String?
         get() = prefs.getString(KEY_CURRENT, null)?.takeIf { id -> list().any { it.id == id } }
             ?: list().firstOrNull()?.id
-        set(v) = prefs.edit().putString(KEY_CURRENT, v).apply()
+        set(v) {
+            prefs.edit().putString(KEY_CURRENT, v).apply()
+            SessionWidget.refresh(context)
+        }
 
     fun current(): VaultRecord? = currentId?.let(::get)
 
@@ -111,11 +115,17 @@ class Vaults(private val context: Context) {
         silenceTimeoutSecs.coerceAtLeast(0).toUInt(),
     )
 
+    /** Volume keys act as shutter (up) and mic toggle (down) during a session. */
+    var volumeKeys: Boolean
+        get() = prefs.getBoolean("volume_keys", true)
+        set(v) = prefs.edit().putBoolean("volume_keys", v).apply()
+
     fun stickyProject(vaultId: String): String? = prefs.getString("sticky_$vaultId", null)
 
     fun setStickyProject(vaultId: String, project: String) {
         prefs.edit().putString("sticky_$vaultId", project).apply()
         touchRecent(vaultId, project)
+        SessionWidget.refresh(context)
     }
 
     /** Most recently used projects in a vault, newest first. */

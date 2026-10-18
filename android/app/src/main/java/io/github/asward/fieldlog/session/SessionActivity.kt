@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -51,6 +52,9 @@ open class SessionActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Usable straight from the lock screen (widget, tile, volume-key launch).
+        setShowWhenLocked(true)
+        setTurnScreenOn(true)
         snapWhenReady = intent.getBooleanExtra(EXTRA_SNAP, false)
 
         setContent {
@@ -122,6 +126,31 @@ open class SessionActivity : ComponentActivity() {
             },
             onError = { msg -> Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() },
         )
+    }
+
+    /** Volume up = shutter, volume down = mic on/off. */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        val c = controller.value
+        if (c != null && vaults.volumeKeys) {
+            when (keyCode) {
+                KeyEvent.KEYCODE_VOLUME_UP -> {
+                    if (event.repeatCount == 0) c.snap()
+                    return true
+                }
+                KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                    if (event.repeatCount == 0) c.toggleMic()
+                    return true
+                }
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (controller.value != null && vaults.volumeKeys &&
+            (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
+        ) return true
+        return super.onKeyUp(keyCode, event)
     }
 
     override fun onResume() {
