@@ -18,6 +18,9 @@ pub enum CoreError {
     S3 { msg: String },
     #[error("nothing to undo")]
     NothingToUndo,
+    /// A log is open in this vault (resume or end it first).
+    #[error("log open: {msg}")]
+    LogOpen { msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;

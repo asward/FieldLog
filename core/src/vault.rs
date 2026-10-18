@@ -1,4 +1,4 @@
-//! A vault is one git repository holding projects and their entries.
+//! A vault is one git repository holding projects and their logs.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,9 +11,16 @@ use serde::{Deserialize, Serialize};
 use crate::error::{invalid, CoreError, Result};
 use crate::format::{self, Block, FrontMatter, ASSETS_DIR, CONFIG_FILE, LOCAL_DIR, PROJECT_FILE};
 use crate::images;
+use crate::log::{self, LogEntry, PhotoRef};
+use crate::logsession::{self, OpenLogInfo};
 use crate::s3::{S3Client, S3Config, S3Credentials};
 
 const ENTRY_TRAILER: &str = "FieldLog-Entry: ";
+const LOG_TRAILER: &str = "FieldLog-Log: ";
+const EDIT_TRAILER: &str = "FieldLog-Edit: ";
+const REVERT_TRAILER: &str = "FieldLog-Revert: ";
+/// Marker in the file name of the local side of a sync conflict.
+const CONFLICT_MARK: &str = ".conflict-";
 const UNDO_TRAILER: &str = "FieldLog-Undo: ";
 const PENDING_UPLOADS: &str = "pending-uploads.txt";
 
@@ -68,6 +75,9 @@ pub struct SyncReport {
     pub pushed: bool,
     pub uploaded_assets: u32,
     pub host_key_sha256: Option<String>,
+    /// Local versions of logs edited on two devices, kept next to the
+    /// remote version.
+    pub conflict_copies: Vec<String>,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -85,7 +95,9 @@ pub struct EntrySummary {
     pub project: String,
     /// Path relative to the vault root.
     pub path: String,
+    /// When the log started (RFC 3339).
     pub created: String,
+    pub ended: Option<String>,
     pub tags: Vec<String>,
     pub summary: String,
     pub photo_count: u32,
@@ -101,6 +113,39 @@ pub struct Entry {
     pub source: Option<String>,
     pub photos: Vec<String>,
     pub body: String,
+}
+
+/// One log, for the blog-style project feed.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct LogSummary {
+    pub id: String,
+    pub project: String,
+    pub path: String,
+    pub started: String,
+    pub ended: Option<String>,
+    pub tags: Vec<String>,
+    /// First lines of the notes.
+    pub summary: String,
+    /// Up to two photos for thumbnails.
+    pub preview_photos: Vec<PhotoRef>,
+    pub photo_count: u32,
+    pub entry_count: u32,
+    /// The local side of a sync conflict, kept next to the original.
+    pub conflict: bool,
+}
+
+/// A whole log, for the log view.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct LogView {
+    pub id: String,
+    pub project: String,
+    pub path: String,
+    pub started: String,
+    pub ended: Option<String>,
+    pub tags: Vec<String>,
+    pub source: Option<String>,
+    pub entries: Vec<LogEntry>,
+    pub conflict: bool,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
@@ -124,6 +169,8 @@ pub struct Vault {
     repo: Mutex<Repository>,
     config: Mutex<VaultConfig>,
     author: Mutex<Author>,
+    /// Names the local copy when a sync conflict keeps both versions.
+    device: Mutex<String>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -225,6 +272,7 @@ impl Vault {
             repo: Mutex::new(repo),
             config: Mutex::new(config),
             author: Mutex::new(author),
+            device: Mutex::new("device".into()),
         })
     }
 
@@ -298,6 +346,224 @@ impl Vault {
         Some((fm, body, rel))
     }
 
+    // ------------------------------------------------------------ logs
+
+    /// Unused path and id for a new log started at `started`.
+    pub(crate) fn new_log_path(
+        &self,
+        project: &str,
+        started: &DateTime<FixedOffset>,
+    ) -> (String, String) {
+        loop {
+            let s = random_suffix();
+            let r = format::entry_rel_path(project, started, &s);
+            if !self.root.join(&r).exists() {
+                return (format::entry_id(started, &s), r);
+            }
+        }
+    }
+
+    fn check_rel(&self, rel: &str) -> Result<PathBuf> {
+        let abs = self.root.join(rel);
+        if rel.contains("..") || rel.starts_with('/') || !abs.starts_with(&self.root) {
+            return Err(invalid("path outside vault"));
+        }
+        Ok(abs)
+    }
+
+    pub(crate) fn load_log(&self, rel: &str) -> Result<(FrontMatter, Vec<LogEntry>)> {
+        let abs = self.check_rel(rel)?;
+        let text = fs::read_to_string(&abs)?;
+        let (fm, body) = format::parse(&text)?;
+        let entries = log::parse_body(&fm, &body);
+        Ok((fm, entries))
+    }
+
+    /// Write a log file and commit it (with its photos in git storage).
+    /// Returns `None` for an edit that left the file as committed.
+    pub(crate) fn commit_log_file(
+        &self,
+        rel: &str,
+        fm: &FrontMatter,
+        entries: &[LogEntry],
+        editing: bool,
+    ) -> Result<Option<CommitInfo>> {
+        let abs = self.check_rel(rel)?;
+        let body = log::render_body(fm, entries);
+        let text = format::render(fm, &body)?;
+        fs::create_dir_all(abs.parent().unwrap())?;
+        fs::write(&abs, &text)?;
+        let repo = self.repo();
+        if editing && head_blob(&repo, rel).as_deref() == Some(text.as_bytes()) {
+            return Ok(None);
+        }
+        let mut add = vec![rel.to_string()];
+        if self.config().image_storage == ImageStorage::Git {
+            for p in log::photos(entries) {
+                let a = format::asset_rel_path(&p.sha256, &p.ext);
+                if !self.root.join(&a).exists() {
+                    return Err(CoreError::NotFound {
+                        msg: format!("photo {a}"),
+                    });
+                }
+                add.push(a);
+            }
+        }
+        let (verb, trailer) = if editing {
+            ("edit ", EDIT_TRAILER)
+        } else {
+            ("", LOG_TRAILER)
+        };
+        let message = format!(
+            "{}: {verb}{}\n\n{trailer}{}\n",
+            fm.project,
+            log_title(entries),
+            fm.id
+        );
+        let oid = self.commit_paths(&repo, &add, &[], &message)?;
+        Ok(Some(CommitInfo {
+            commit: oid.to_string(),
+            entry: summarize(fm, &body, rel.to_string()),
+        }))
+    }
+
+    /// Commit a finished log in one go (share sheet).
+    pub(crate) fn commit_new_log(
+        &self,
+        project: &str,
+        entries: Vec<LogEntry>,
+        tags: Vec<String>,
+        source: &str,
+    ) -> Result<CommitInfo> {
+        if !self.root.join(project).is_dir() {
+            return Err(CoreError::NotFound {
+                msg: format!("project {project}"),
+            });
+        }
+        let now = crate::log::now_secs();
+        let started = entries
+            .first()
+            .and_then(|e| log::parse_time(&e.time))
+            .unwrap_or(now);
+        let (id, rel) = self.new_log_path(project, &started);
+        let mut tags: Vec<String> = tags
+            .iter()
+            .map(|t| format::slugify(t))
+            .filter(|t| !t.is_empty())
+            .collect();
+        tags.dedup();
+        let fm = FrontMatter {
+            id,
+            project: project.to_string(),
+            started,
+            ended: Some(now),
+            tags,
+            source: Some(source.to_string()),
+            photos: log::photos(&entries)
+                .into_iter()
+                .map(|p| p.sha256)
+                .collect(),
+            extra: Default::default(),
+        };
+        match self.commit_log_file(&rel, &fm, &entries, false) {
+            Ok(Some(info)) => Ok(info),
+            Ok(None) => Err(invalid("nothing to commit")),
+            Err(e) => {
+                let _ = fs::remove_file(self.root.join(&rel));
+                Err(e)
+            }
+        }
+    }
+
+    /// Delete a committed log in a new commit. History keeps it.
+    pub(crate) fn remove_log_file(&self, rel: &str, fm: &FrontMatter) -> Result<CommitInfo> {
+        let abs = self.check_rel(rel)?;
+        let repo = self.repo();
+        let entries = head_blob(&repo, rel)
+            .and_then(|b| String::from_utf8(b).ok())
+            .and_then(|t| format::parse(&t).ok())
+            .map(|(f, body)| log::parse_body(&f, &body))
+            .unwrap_or_default();
+        let _ = fs::remove_file(&abs);
+        let message = format!(
+            "{}: remove {}\n\n{REVERT_TRAILER}{}\n",
+            fm.project,
+            log_title(&entries),
+            fm.id
+        );
+        let oid = self.commit_paths(&repo, &[], &[rel.to_string()], &message)?;
+        let body = log::render_body(fm, &entries);
+        Ok(CommitInfo {
+            commit: oid.to_string(),
+            entry: summarize(fm, &body, rel.to_string()),
+        })
+    }
+
+    /// Put a file back to its committed version.
+    pub(crate) fn restore_file(&self, rel: &str) -> Result<()> {
+        self.check_rel(rel)?;
+        let repo = self.repo();
+        repo.checkout_head(Some(CheckoutBuilder::new().force().path(rel)))?;
+        Ok(())
+    }
+
+    /// Resolve merge conflicts on log files by keeping both: theirs at the
+    /// original path, ours next to it as `<name>.conflict-<device>-<time>.md`.
+    /// Conflicts on anything else are an error.
+    fn keep_both(&self, idx: &mut git2::Index) -> Result<Vec<String>> {
+        let conflicts: Vec<git2::IndexConflict> = idx
+            .conflicts()?
+            .collect::<std::result::Result<Vec<_>, git2::Error>>()?;
+        let device = {
+            let d = format::slugify(&lock(&self.device));
+            if d.is_empty() {
+                "device".to_string()
+            } else {
+                d
+            }
+        };
+        let stamp = Local::now().format("%Y%m%dT%H%M%S").to_string();
+        let mut copies = Vec::new();
+        let mut other = Vec::new();
+        for c in conflicts {
+            let path = c
+                .our
+                .as_ref()
+                .or(c.their.as_ref())
+                .or(c.ancestor.as_ref())
+                .map(|e| String::from_utf8_lossy(&e.path).into_owned())
+                .unwrap_or_default();
+            let is_log = path.ends_with(".md")
+                && path.contains('/')
+                && !path.ends_with(&format!("/{PROJECT_FILE}"));
+            if !is_log {
+                other.push(path);
+                continue;
+            }
+            idx.conflict_remove(Path::new(&path))?;
+            match (c.our, c.their) {
+                (Some(ours), Some(theirs)) => {
+                    idx.add(&stage0(theirs))?;
+                    let stem = path.trim_end_matches(".md");
+                    let copy = format!("{stem}{CONFLICT_MARK}{device}-{stamp}.md");
+                    let mut e = stage0(ours);
+                    e.flags = copy.len().min(0xFFF) as u16;
+                    e.path = copy.clone().into_bytes();
+                    idx.add(&e)?;
+                    copies.push(copy);
+                }
+                (Some(e), None) | (None, Some(e)) => idx.add(&stage0(e))?,
+                (None, None) => {}
+            }
+        }
+        if !other.is_empty() {
+            return Err(CoreError::Conflict {
+                msg: other.join(", "),
+            });
+        }
+        Ok(copies)
+    }
+
     fn pending_path(&self) -> Result<PathBuf> {
         Ok(self.local_dir()?.join(PENDING_UPLOADS))
     }
@@ -325,15 +591,63 @@ impl Vault {
     }
 }
 
+fn head_blob(repo: &Repository, rel: &str) -> Option<Vec<u8>> {
+    let tree = repo.head().ok()?.peel_to_tree().ok()?;
+    let entry = tree.get_path(Path::new(rel)).ok()?;
+    let blob = repo.find_blob(entry.id()).ok()?;
+    Some(blob.content().to_vec())
+}
+
+/// The same index entry as a normal (stage 0) entry.
+fn stage0(mut e: git2::IndexEntry) -> git2::IndexEntry {
+    e.flags &= !0x3000;
+    e
+}
+
 fn summarize(fm: &FrontMatter, body: &str, rel: String) -> EntrySummary {
+    let entries = log::parse_body(fm, body);
     EntrySummary {
         id: fm.id.clone(),
         project: fm.project.clone(),
         path: rel,
-        created: fm.created.to_rfc3339(),
+        created: fm.started.to_rfc3339(),
+        ended: fm.ended.map(|d| d.to_rfc3339()),
         tags: fm.tags.clone(),
-        summary: format::summary_line(body, 120),
-        photo_count: fm.photos.len() as u32,
+        summary: log::summary(&entries, 120),
+        photo_count: log::photos(&entries).len() as u32,
+    }
+}
+
+fn log_summary(fm: &FrontMatter, body: &str, rel: String) -> LogSummary {
+    let entries = log::parse_body(fm, body);
+    let photos = log::photos(&entries);
+    LogSummary {
+        id: fm.id.clone(),
+        project: fm.project.clone(),
+        conflict: rel.contains(CONFLICT_MARK),
+        path: rel,
+        started: fm.started.to_rfc3339(),
+        ended: fm.ended.map(|d| d.to_rfc3339()),
+        tags: fm.tags.clone(),
+        summary: log::summary(&entries, 240),
+        photo_count: photos.len() as u32,
+        preview_photos: photos.into_iter().take(2).collect(),
+        entry_count: entries.len() as u32,
+    }
+}
+
+/// First line of a commit subject for a log.
+fn log_title(entries: &[LogEntry]) -> String {
+    let s = log::summary(entries, 60);
+    if s.is_empty() {
+        let n = log::photos(entries).len();
+        if n == 1 {
+            "1 photo".into()
+        } else {
+            format!("{n} photos")
+        }
+    } else {
+        s
     }
 }
 
@@ -429,6 +743,57 @@ impl Vault {
         *lock(&self.author) = author;
     }
 
+    /// Short device name used for conflict copies (e.g. the phone model).
+    pub fn set_device_name(&self, name: String) {
+        *lock(&self.device) = name;
+    }
+
+    /// The log currently open in this vault, if any.
+    pub fn open_log(&self) -> Option<OpenLogInfo> {
+        logsession::open_log_info(self)
+    }
+
+    /// Logs, newest first. `limit` 0 = all.
+    pub fn list_logs(&self, project: Option<String>, limit: u32) -> Vec<LogSummary> {
+        let mut v: Vec<LogSummary> = self
+            .entry_files(project.as_deref())
+            .iter()
+            .filter_map(|p| self.load(p))
+            .map(|(fm, body, rel)| log_summary(&fm, &body, rel))
+            .collect();
+        v.sort_by(|a, b| b.started.cmp(&a.started).then(a.path.cmp(&b.path)));
+        if limit > 0 {
+            v.truncate(limit as usize);
+        }
+        v
+    }
+
+    pub fn read_log(&self, path: String) -> Result<LogView> {
+        let (fm, entries) = self.load_log(&path)?;
+        Ok(LogView {
+            id: fm.id,
+            project: fm.project,
+            conflict: path.contains(CONFLICT_MARK),
+            path,
+            started: fm.started.to_rfc3339(),
+            ended: fm.ended.map(|d| d.to_rfc3339()),
+            tags: fm.tags,
+            source: fm.source,
+            entries,
+        })
+    }
+
+    /// Remove a committed log with a new commit (history keeps it).
+    pub fn revert_log(&self, path: String) -> Result<CommitInfo> {
+        if self.open_log().is_some_and(|o| o.path == path) {
+            return Err(CoreError::LogOpen {
+                msg: "this log is open; end or discard it first".into(),
+            });
+        }
+        let (fm, _) = self.load_log(&path)?;
+        self.remove_log_file(&path, &fm)
+    }
+
     /// Update and commit `fieldlog.toml` (and `.gitignore` for storage mode).
     pub fn set_config(&self, config: VaultConfig) -> Result<()> {
         if config.image_storage == ImageStorage::S3 && config.s3.is_none() {
@@ -510,7 +875,8 @@ impl Vault {
             let mut created: Vec<DateTime<FixedOffset>> = self
                 .entry_files(Some(&name))
                 .iter()
-                .filter_map(|p| self.load(p).map(|(fm, _, _)| fm.created))
+                .filter(|p| !p.to_string_lossy().contains(CONFLICT_MARK))
+                .filter_map(|p| self.load(p).map(|(fm, _, _)| fm.started))
                 .collect();
             if created.is_empty() && !readme.exists() {
                 continue; // a random directory, not a project
@@ -552,7 +918,7 @@ impl Vault {
                 self.set_pending_uploads(&pending)?;
             }
         }
-        Ok(Block::Photo { sha256: sha, ext })
+        Ok(Block::photo(sha, ext))
     }
 
     /// Write and commit one entry. `created` is RFC 3339; `None` means now.
@@ -586,7 +952,7 @@ impl Vault {
         let photos: Vec<(String, String)> = blocks
             .iter()
             .filter_map(|b| match b {
-                Block::Photo { sha256, ext } => Some((sha256.clone(), ext.clone())),
+                Block::Photo { sha256, ext, .. } => Some((sha256.clone(), ext.clone())),
                 _ => None,
             })
             .collect();
@@ -603,7 +969,8 @@ impl Vault {
         let fm = FrontMatter {
             id: format::entry_id(&created, &suffix),
             project: project.clone(),
-            created,
+            started: created,
+            ended: None,
             tags,
             source,
             photos: photos.iter().map(|(s, _)| s.clone()).collect(),
@@ -736,7 +1103,7 @@ impl Vault {
             id: fm.id,
             project: fm.project,
             path,
-            created: fm.created.to_rfc3339(),
+            created: fm.started.to_rfc3339(),
             tags: fm.tags,
             source: fm.source,
             photos: fm.photos,
@@ -828,6 +1195,11 @@ impl Vault {
         credentials: GitCredentials,
         s3_credentials: Option<S3Credentials>,
     ) -> Result<SyncReport> {
+        if let Some(open) = self.open_log() {
+            return Err(CoreError::LogOpen {
+                msg: format!("a log is open in {}; end it before syncing", open.project),
+            });
+        }
         let mut report = SyncReport::default();
         if let Some(c) = s3_credentials {
             report.uploaded_assets = self.upload_pending(c)?;
@@ -881,15 +1253,7 @@ impl Vault {
                 report.pulled_commits = behind as u32;
                 let mut idx = repo.merge_commits(&local, &theirs, None)?;
                 if idx.has_conflicts() {
-                    let paths: Vec<String> = idx
-                        .conflicts()?
-                        .filter_map(|c| c.ok())
-                        .filter_map(|c| c.our.or(c.their))
-                        .map(|e| String::from_utf8_lossy(&e.path).into_owned())
-                        .collect();
-                    return Err(CoreError::Conflict {
-                        msg: paths.join(", "),
-                    });
+                    report.conflict_copies = self.keep_both(&mut idx)?;
                 }
                 let tree = repo.find_tree(idx.write_tree_to(&repo)?)?;
                 let sig = self.signature()?;

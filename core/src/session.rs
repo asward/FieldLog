@@ -11,7 +11,7 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
-use crate::format::{self, Block, LOCAL_DIR};
+use crate::format::{self, split_last_sentence, Block, LOCAL_DIR};
 use crate::vault::{CommitInfo, EntrySummary, Vault};
 use crate::voice::{self, Command, VoiceItem};
 
@@ -91,21 +91,6 @@ pub struct Session {
     vault: Arc<Vault>,
     project: String,
     inner: Mutex<Inner>,
-}
-
-/// Remove the final sentence of `text`. Returns (remaining, removed).
-fn split_last_sentence(text: &str) -> (String, String) {
-    let t = text.trim_end();
-    let body = t.trim_end_matches(['.', '!', '?', '…']);
-    let cut = body
-        .char_indices()
-        .filter(|(_, c)| matches!(c, '.' | '!' | '?' | '…'))
-        .map(|(i, c)| i + c.len_utf8())
-        .rfind(|&i| body[i..].starts_with(char::is_whitespace));
-    match cut {
-        Some(i) => (t[..i].trim_end().to_string(), t[i..].trim().to_string()),
-        None => (String::new(), t.to_string()),
-    }
 }
 
 impl Session {
@@ -328,8 +313,8 @@ impl Session {
     }
 }
 
-/// Commit a single shared item (text, link or images) straight to a project.
-/// Used by the share sheet; never touches the session draft.
+/// Commit a single shared item (text, link or images) straight to a project
+/// as a one-note log. Used by the share sheet; never touches an open log.
 #[uniffi::export]
 pub fn commit_shared(
     vault: Arc<Vault>,
@@ -348,12 +333,20 @@ pub fn commit_shared(
     for img in images {
         blocks.push(vault.add_photo(img)?);
     }
-    vault.commit_entry(project, blocks, tags, Some("share".into()), None)
+    if blocks.is_empty() {
+        return Err(crate::error::invalid("nothing to share"));
+    }
+    let entry = crate::log::LogEntry {
+        kind: crate::log::EntryKind::Note,
+        time: Local::now().fixed_offset().to_rfc3339(),
+        blocks,
+    };
+    vault.commit_new_log(&project, vec![entry], tags, "share")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::split_last_sentence;
+    use crate::format::split_last_sentence;
 
     #[test]
     fn last_sentence() {
