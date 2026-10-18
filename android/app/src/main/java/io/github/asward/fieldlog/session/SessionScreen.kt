@@ -54,6 +54,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import io.github.asward.fieldlog.speech.SpeechSupport
 import io.github.asward.fieldlog.ui.Thumb
 import io.github.asward.fieldlog.vaults
 import androidx.compose.ui.platform.LocalContext
@@ -77,10 +78,32 @@ fun SessionScreen(c: SessionController, onClose: () -> Unit) {
         ) {
             Column(Modifier.weight(1f)) {
                 Text(c.projectTitle, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(c.vaultName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    "${c.vaultName} · ${c.speechLabel}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
             ListeningDot(c.micOn && c.listening)
             IconButton(onClick = onClose) { Icon(Icons.Default.Close, "Close session") }
+        }
+
+        c.fallback?.let { msg ->
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp).clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.errorContainer).padding(start = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(msg, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                TextButton(onClick = {
+                    if (!SpeechSupport.triggerLanguageDownload(context)) {
+                        android.widget.Toast.makeText(context, "Download it in the phone's speech settings", android.widget.Toast.LENGTH_LONG).show()
+                    }
+                    c.fallback = null
+                }) { Text("Download") }
+            }
         }
 
         // Camera: tap to snap.

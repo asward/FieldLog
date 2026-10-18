@@ -104,6 +104,11 @@ fun SettingsScreen(nav: Nav) {
                 .verticalScroll(rememberScrollState()),
         ) {
             Section("Voice")
+            ListItem(
+                modifier = Modifier.clickable { save(); nav.push(Screen.Speech) },
+                headlineContent = { Text("Speech recognition") },
+                supportingContent = { Text("${vaults.speechSetup.label} · run the speech check") },
+            )
             OutlinedTextField(
                 prefix, { prefix = it }, label = { Text("Command prefix") }, singleLine = true,
                 supportingText = {
