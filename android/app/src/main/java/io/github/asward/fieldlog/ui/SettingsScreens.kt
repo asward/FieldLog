@@ -3,6 +3,9 @@
 package io.github.asward.fieldlog.ui
 
 import android.os.Build
+import android.text.format.Formatter
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -46,6 +49,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import io.github.asward.fieldlog.data.PhotoExport
 import io.github.asward.fieldlog.data.VaultSecrets
 import io.github.asward.fieldlog.sync.SyncWorker
 import io.github.asward.fieldlog.userMessage
@@ -59,6 +63,7 @@ import uniffi.fieldlog_core.Author
 import uniffi.fieldlog_core.ImageStorage
 import uniffi.fieldlog_core.S3Config
 import uniffi.fieldlog_core.generateSshKey
+import uniffi.fieldlog_core.isHostedGitRemote
 import uniffi.fieldlog_core.libgitInfo
 
 @Composable
@@ -180,7 +185,18 @@ fun VaultSetupScreen(nav: Nav, vaultId: String?) {
     var showPaste by remember { mutableStateOf(false) }
     var httpsUser by remember { mutableStateOf(secrets.httpsUsername ?: "") }
     var httpsToken by remember { mutableStateOf(secrets.httpsToken ?: "") }
-    var s3Mode by remember { mutableStateOf(config?.imageStorage == ImageStorage.S3) }
+    var storage by remember { mutableStateOf(config?.imageStorage ?: ImageStorage.LOCAL) }
+    val s3Mode = storage == ImageStorage.S3
+    val backup = remember { if (editing) runCatching { vaults.open(id).photoBackup() }.getOrNull() else null }
+    val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val r = withContext(Dispatchers.IO) { runCatching { PhotoExport.write(context, id, uri) } }
+                r.onSuccess { n -> context.toast(if (n == 1) "Exported 1 photo" else "Exported $n photos") }
+                    .onFailure { context.toast(it.userMessage()) }
+            }
+        }
+    }
     var s3Endpoint by remember { mutableStateOf(config?.s3?.endpoint ?: "https://s3.us-east-1.amazonaws.com") }
     var s3Region by remember { mutableStateOf(config?.s3?.region ?: "us-east-1") }
     var s3Bucket by remember { mutableStateOf(config?.s3?.bucket ?: "") }
@@ -290,12 +306,43 @@ fun VaultSetupScreen(nav: Nav, vaultId: String?) {
 
             if (editing) {
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Store photos in S3")
-                        Text("Keeps images out of git. Off: photos are committed to the repo.", style = MaterialTheme.typography.bodySmall)
+                Text("Photo storage", style = MaterialTheme.typography.titleSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(selected = storage == ImageStorage.LOCAL, onClick = { storage = ImageStorage.LOCAL }, label = { Text("This phone") })
+                    FilterChip(selected = storage == ImageStorage.S3, onClick = { storage = ImageStorage.S3 }, label = { Text("S3 / R2") })
+                    FilterChip(selected = storage == ImageStorage.GIT, onClick = { storage = ImageStorage.GIT }, label = { Text("Git") })
+                }
+                Text(
+                    when (storage) {
+                        ImageStorage.LOCAL -> "Photos stay on this phone and are queued for upload. When you set up S3 or R2, " +
+                            "they upload with the same names, so nothing in the repo changes."
+                        ImageStorage.S3 -> "Photos upload to your bucket (S3, Cloudflare R2, MinIO…) before every push and stay out of git."
+                        ImageStorage.GIT -> "Photos are committed to the repo with each log. Best for self-hosted remotes."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (storage == ImageStorage.GIT && useRemote && isHostedGitRemote(url)) {
+                    Text(
+                        "This remote has a storage quota. Committing photos will fill it quickly; " +
+                            "“This phone” or S3 / R2 is a better fit.",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                if (backup != null && backup.count > 0u) {
+                    Card(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(12.dp)) {
+                            Text(
+                                "${backup.count} photo${if (backup.count == 1u) "" else "s"} not backed up " +
+                                    "(${Formatter.formatShortFileSize(context, backup.bytes.toLong())})",
+                            )
+                            Text(
+                                "They live only in this app's storage. Uninstalling the app or clearing its data deletes them.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            TextButton(onClick = { exporter.launch("fieldlog-photos.zip") }) { Text("Export photos") }
+                        }
                     }
-                    Switch(checked = s3Mode, onCheckedChange = { s3Mode = it })
                 }
                 if (s3Mode) {
                     OutlinedTextField(s3Endpoint, { s3Endpoint = it }, label = { Text("Endpoint") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -336,7 +383,7 @@ fun VaultSetupScreen(nav: Nav, vaultId: String?) {
                             val v = vaults.open(id)
                             val cfg = v.config()
                             val newCfg = cfg.copy(
-                                imageStorage = if (s3Mode) ImageStorage.S3 else ImageStorage.GIT,
+                                imageStorage = storage,
                                 s3 = if (s3Mode) S3Config(s3Endpoint.trim(), s3Region.trim(), s3Bucket.trim(), s3Prefix.trim(), s3PathStyle) else cfg.s3,
                             )
                             if (newCfg != cfg) v.setConfig(newCfg)
