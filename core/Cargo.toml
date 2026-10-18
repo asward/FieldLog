@@ -1,0 +1,29 @@
+[workspace]
+members = [".", "uniffi-bindgen"]
+resolver = "2"
+
+[package]
+name = "fieldlog-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Shared FieldLog core: vaults, git, entry format, session engine, search, images, S3."
+
+[lib]
+name = "fieldlog_core"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "ssh", "https", "vendored-openssl"] }
+uniffi = { version = "0.32" }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "unwind"
