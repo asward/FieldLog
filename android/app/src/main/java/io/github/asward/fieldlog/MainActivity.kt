@@ -74,7 +74,10 @@ private fun SpikeScreen(filesDir: File) {
             key, { key = it }, label = { Text("Private key (PEM / OpenSSH)") },
             modifier = Modifier.fillMaxWidth(), minLines = 3,
         )
-        Button(onClick = { run("ls-remote") { spikeLsRemote(url, key, null).joinToString("\n") } }) {
+        Button(onClick = { run("ls-remote") {
+            val refs = spikeLsRemote(url, key, null)
+            if (refs.isEmpty()) "Connected and authenticated. 0 refs (the repo is empty)." else "OK, ${refs.size} refs:\n" + refs.joinToString("\n")
+        } }) {
             Text("ls-remote over SSH")
         }
         Text(log, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
